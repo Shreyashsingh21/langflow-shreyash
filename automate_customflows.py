@@ -96,7 +96,8 @@ class CustomflowsAutomation:
         self.customflows_dir = self.workspace_path / "customflows"
         # Resolve Langflow components path dynamically (active venv / environment)
         self.langflow_components_path = self._resolve_langflow_components_path()
-        self.custom_category_name = "custom_flows"
+        # Category folder name shown in Langflow sidebar (no spaces). Override with CUSTOM_CATEGORY_NAME env.
+        self.custom_category_name = os.environ.get("CUSTOM_CATEGORY_NAME", "SelfDeployedModels")
         self.validator = ComponentValidator()
 
     def _resolve_langflow_components_path(self) -> Path:
