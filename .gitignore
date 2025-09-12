@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+*.log
+
+# Virtual environments
+.venv/
+venv/
+.env
+.env.local
+
+# Caches and tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Node (if present)
+node_modules/
+
+# Do not track installed packages
+**/site-packages/**
+
+# Project-specific
+langflow_components_backup/
+
