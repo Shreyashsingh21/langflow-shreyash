@@ -36,7 +36,7 @@ class AgentComponent(ToolCallingAgentComponent):
     documentation: str = "https://docs.langflow.org/agents"
     icon = "bot"
     beta = False
-    name = "Agent"
+    name = "SelfHostedAgent"
 
     memory_inputs = [set_advanced_true(component_input) for component_input in MemoryComponent().inputs]
 
