@@ -60,13 +60,13 @@ class ComponentValidator:
                     # Check if class inherits from Langflow component base classes
                     for base in node.bases:
                         if isinstance(base, ast.Name):
-                            if base.id in ['LCModelComponent', 'Component', 'CustomComponent']:
+                            if base.id in ['LCModelComponent', 'Component', 'CustomComponent', 'ToolCallingAgentComponent', 'LCToolsAgentComponent']:
                                 component_info['component_classes'].append({
                                     'name': node.name,
                                     'base_class': base.id
                                 })
                         elif isinstance(base, ast.Attribute):
-                            if base.attr in ['LCModelComponent', 'Component', 'CustomComponent']:
+                            if base.attr in ['LCModelComponent', 'Component', 'CustomComponent', 'ToolCallingAgentComponent', 'LCToolsAgentComponent']:
                                 component_info['component_classes'].append({
                                     'name': node.name,
                                     'base_class': base.attr

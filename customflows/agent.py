@@ -4,10 +4,6 @@ from langflow.base.agents.agent import LCToolsAgentComponent
 from langflow.base.agents.events import ExceptionWithMessageError
 from langflow.base.models.model_input_constants import (
     ALL_PROVIDER_FIELDS,
-    MODEL_DYNAMIC_UPDATE_FIELDS,
-    MODEL_PROVIDERS,
-    MODEL_PROVIDERS_DICT,
-    MODELS_METADATA,
 )
 from langflow.base.models.model_utils import get_model_name
 from langflow.components.helpers.current_date import CurrentDateComponent
@@ -27,11 +23,15 @@ def set_advanced_true(component_input):
     return component_input
 
 
-MODEL_PROVIDERS_LIST = ["Anthropic", "Google Generative AI", "Groq", "OpenAI"]
+MODEL_PROVIDERS_LIST = [
+    # Custom local models only
+    "GPT-OSS (Crimson)",
+    "Llama Local (Crimson)",
+]
 
 
 class AgentComponent(ToolCallingAgentComponent):
-    display_name: str = "Agent"
+    display_name: str = "Self Hosted Agent"
     description: str = "Define the agent's instructions, then enter a task to complete using tools."
     documentation: str = "https://docs.langflow.org/agents"
     icon = "bot"
@@ -44,14 +44,13 @@ class AgentComponent(ToolCallingAgentComponent):
         DropdownInput(
             name="agent_llm",
             display_name="Model Provider",
-            info="The provider of the language model that the agent will use to generate responses.",
-            options=[*MODEL_PROVIDERS_LIST, "Custom"],
-            value="OpenAI",
+            info="Select which local model the agent will use.",
+            options=MODEL_PROVIDERS_LIST,
+            value="GPT-OSS (Crimson)",
             real_time_refresh=True,
             input_types=[],
-            options_metadata=[MODELS_METADATA[key] for key in MODEL_PROVIDERS_LIST] + [{"icon": "brain"}],
+            options_metadata=[{"icon": "OpenAI"}, {"icon": "Ollama"}],
         ),
-        *MODEL_PROVIDERS_DICT["OpenAI"]["inputs"],
         MultilineInput(
             name="system_prompt",
             display_name="Agent Instructions",
@@ -142,17 +141,31 @@ class AgentComponent(ToolCallingAgentComponent):
             return self.agent_llm, None
 
         try:
-            provider_info = MODEL_PROVIDERS_DICT.get(self.agent_llm)
-            if not provider_info:
-                msg = f"Invalid model provider: {self.agent_llm}"
-                raise ValueError(msg)
+            # Handle custom local models without relying on MODEL_PROVIDERS_DICT
+            if self.agent_llm in ("GPT-OSS (Crimson)", "Llama Local (Crimson)"):
+                # Lazy import to avoid circular deps during build
+                from langflow.components.SelfDeployedModels.combine_models import (
+                    LocalLanguageModelComponent as CrimsonLocalComponent,
+                )
+                # Map provider display name to component provider value
+                provider_map = {
+                    "GPT-OSS (Crimson)": "GPT-OSS",
+                    "Llama Local (Crimson)": "Llama Local",
+                }
+                provider_value = provider_map.get(self.agent_llm, "GPT-OSS")
 
-            component_class = provider_info.get("component_class")
-            display_name = component_class.display_name
-            inputs = provider_info.get("inputs")
-            prefix = provider_info.get("prefix", "")
+                # Build with safe defaults; these align with the component defaults
+                crimson_component = CrimsonLocalComponent().set(
+                    provider=provider_value,
+                    temperature=0.7,
+                    max_tokens=512,
+                    timeout=60,
+                    json_mode=False,
+                )
+                return crimson_component.build_model(), self.agent_llm
 
-            return self._build_llm_model(component_class, inputs, prefix), display_name
+            msg = f"Invalid model provider: {self.agent_llm}"
+            raise ValueError(msg)
 
         except Exception as e:
             logger.error(f"Error building {self.agent_llm} language model: {e!s}")
@@ -160,21 +173,8 @@ class AgentComponent(ToolCallingAgentComponent):
             raise ValueError(msg) from e
 
     def _build_llm_model(self, component, inputs, prefix=""):
-        model_kwargs = {}
-        for input_ in inputs:
-            if hasattr(self, f"{prefix}{input_.name}"):
-                model_kwargs[input_.name] = getattr(self, f"{prefix}{input_.name}")
-        return component.set(**model_kwargs).build_model()
-
-    def set_component_params(self, component):
-        provider_info = MODEL_PROVIDERS_DICT.get(self.agent_llm)
-        if provider_info:
-            inputs = provider_info.get("inputs")
-            prefix = provider_info.get("prefix")
-            model_kwargs = {input_.name: getattr(self, f"{prefix}{input_.name}") for input_ in inputs}
-
-            return component.set(**model_kwargs)
-        return component
+        # Deprecated path for built-in providers. Not used for custom-only setup.
+        return component.set().build_model()
 
     def delete_fields(self, build_config: dotdict, fields: dict | list[str]) -> None:
         """Delete specified fields from build_config."""
@@ -194,98 +194,21 @@ class AgentComponent(ToolCallingAgentComponent):
     async def update_build_config(
         self, build_config: dotdict, field_value: str, field_name: str | None = None
     ) -> dotdict:
-        # Iterate over all providers in the MODEL_PROVIDERS_DICT
-        # Existing logic for updating build_config
+        # Custom-only: just propagate the selected provider value and keep inputs stable
         if field_name in ("agent_llm",):
-            build_config["agent_llm"]["value"] = field_value
-            provider_info = MODEL_PROVIDERS_DICT.get(field_value)
-            if provider_info:
-                component_class = provider_info.get("component_class")
-                if component_class and hasattr(component_class, "update_build_config"):
-                    # Call the component class's update_build_config method
-                    build_config = await update_component_build_config(
-                        component_class, build_config, field_value, "model_name"
-                    )
-
-            provider_configs: dict[str, tuple[dict, list[dict]]] = {
-                provider: (
-                    MODEL_PROVIDERS_DICT[provider]["fields"],
-                    [
-                        MODEL_PROVIDERS_DICT[other_provider]["fields"]
-                        for other_provider in MODEL_PROVIDERS_DICT
-                        if other_provider != provider
-                    ],
-                )
-                for provider in MODEL_PROVIDERS_DICT
-            }
-            if field_value in provider_configs:
-                fields_to_add, fields_to_delete = provider_configs[field_value]
-
-                # Delete fields from other providers
-                for fields in fields_to_delete:
-                    self.delete_fields(build_config, fields)
-
-                # Add provider-specific fields
-                if field_value == "OpenAI" and not any(field in build_config for field in fields_to_add):
-                    build_config.update(fields_to_add)
-                else:
-                    build_config.update(fields_to_add)
-                # Reset input types for agent_llm
+            if "agent_llm" in build_config:
+                build_config["agent_llm"]["value"] = field_value
                 build_config["agent_llm"]["input_types"] = []
-            elif field_value == "Custom":
-                # Delete all provider fields
-                self.delete_fields(build_config, ALL_PROVIDER_FIELDS)
-                # Update with custom component
-                custom_component = DropdownInput(
-                    name="agent_llm",
-                    display_name="Language Model",
-                    options=[*sorted(MODEL_PROVIDERS), "Custom"],
-                    value="Custom",
-                    real_time_refresh=True,
-                    input_types=["LanguageModel"],
-                    options_metadata=[MODELS_METADATA[key] for key in sorted(MODELS_METADATA.keys())]
-                    + [{"icon": "brain"}],
-                )
-                build_config.update({"agent_llm": custom_component.to_dict()})
-            # Update input types for all fields
-            build_config = self.update_input_types(build_config)
-
-            # Validate required keys
-            default_keys = [
-                "code",
-                "_type",
-                "agent_llm",
-                "tools",
-                "input_value",
-                "add_current_date_tool",
-                "system_prompt",
-                "agent_description",
-                "max_iterations",
-                "handle_parsing_errors",
-                "verbose",
-            ]
-            missing_keys = [key for key in default_keys if key not in build_config]
-            if missing_keys:
-                msg = f"Missing required keys in build_config: {missing_keys}"
-                raise ValueError(msg)
-        if (
-            isinstance(self.agent_llm, str)
-            and self.agent_llm in MODEL_PROVIDERS_DICT
-            and field_name in MODEL_DYNAMIC_UPDATE_FIELDS
-        ):
-            provider_info = MODEL_PROVIDERS_DICT.get(self.agent_llm)
-            if provider_info:
-                component_class = provider_info.get("component_class")
-                component_class = self.set_component_params(component_class)
-                prefix = provider_info.get("prefix")
-                if component_class and hasattr(component_class, "update_build_config"):
-                    # Call each component class's update_build_config method
-                    # remove the prefix from the field_name
-                    if isinstance(field_name, str) and isinstance(prefix, str):
-                        field_name = field_name.replace(prefix, "")
-                    build_config = await update_component_build_config(
-                        component_class, build_config, field_value, "model_name"
-                    )
+        # Ensure required keys exist minimally
+        for key in [
+            "agent_llm",
+            "tools",
+            "input_value",
+            "add_current_date_tool",
+            "system_prompt",
+        ]:
+            if key not in build_config:
+                continue
         return dotdict({k: v.to_dict() if hasattr(v, "to_dict") else v for k, v in build_config.items()})
 
     async def _get_tools(self) -> list[Tool]:
