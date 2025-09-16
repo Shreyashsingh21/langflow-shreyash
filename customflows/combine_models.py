@@ -32,8 +32,8 @@ class LocalLanguageModelComponent(LCModelComponent):
             display_name="Model Name",
             # Expose the hardcoded defaults from each implementation for clarity
             options=[
-                "gpt-oss:20b",  # from gotoss.py
-                "meta-llama/Llama-3.1-8B-Instruct",  # from lamma.py
+                "gpt-oss:20b",  # from gptoss.py
+                "meta-llama/Llama-3.1-8B-Instruct",  # from llama.py
             ],
             value="gpt-oss:20b",
             info="Select the model preset (provider-specific)",
@@ -100,7 +100,7 @@ class LocalLanguageModelComponent(LCModelComponent):
 
         if provider == "GPT-OSS":
             # Instantiate the LocalChatModel from installed SelfDeployedModels to avoid relative import resolution issues
-            from langflow.components.SelfDeployedModels.gotoss import LocalChatModel as GPTOSSLocalChatModel
+            from langflow.components.SelfDeployedModels.gptoss import LocalChatModel as GPTOSSLocalChatModel
             return GPTOSSLocalChatModel(
                 json_mode=json_mode,
                 temperature=temperature,
@@ -110,7 +110,7 @@ class LocalLanguageModelComponent(LCModelComponent):
 
         if provider == "Llama Local":
             # Instantiate the LocalChatModel from installed SelfDeployedModels to avoid relative import resolution issues
-            from langflow.components.SelfDeployedModels.lamma import LocalChatModel as LlamaLocalChatModel
+            from langflow.components.SelfDeployedModels.llama import LocalChatModel as LlamaLocalChatModel
             return LlamaLocalChatModel(
                 json_mode=json_mode,
                 temperature=temperature,
