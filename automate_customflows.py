@@ -137,7 +137,12 @@ class CustomflowsAutomation:
             pass
 
         # 4) Guess common local venv layouts inside workspace
-        venv_roots = [self.workspace_path / ".venv", self.workspace_path / "venv"]
+        venv_roots = [
+            self.workspace_path / ".langflow-uat-env",
+            self.workspace_path / "langflow-uat-env",
+            self.workspace_path / ".venv",
+            self.workspace_path / "venv",
+        ]
         candidates = []
         for root in venv_roots:
             if root.exists():

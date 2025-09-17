@@ -33,25 +33,54 @@ class LocalChatModel(BaseChatModel):
     max_tokens: int = 512  
     timeout: int = 60
     def _sanitize_final_content(self, content: str) -> str:
-        """Remove leaked tool-call JSON and collapse duplicate consecutive lines."""
+        """Remove leaked tool-call JSON and collapse duplicate text.
+
+        Heuristics:
+        - Strip fenced JSON/code blocks
+        - Remove inline {action/...} and {actions:[...]} snippets
+        - Deduplicate consecutive identical lines
+        - If the response body appears duplicated end-to-end, keep the first half
+        """
         try:
             import re
             text = content or ""
-            # Remove fenced JSON blocks
+            # Remove fenced JSON/code blocks
             text = re.sub(r"```json[\s\S]*?```", "", text, flags=re.MULTILINE)
             text = re.sub(r"```[\s\S]*?```", "", text, flags=re.MULTILINE)
             # Remove inline action JSON objects (single or batched)
             text = re.sub(r"\{\s*\"actions\"\s*:\s*\[[\s\S]*?\]\s*\}", "", text)
             text = re.sub(r"\{\s*\"action\"\s*:\s*\"[^\"]+\"[\s\S]*?\}", "", text)
+
             # Collapse duplicate consecutive lines
-            lines = [ln for ln in (text.splitlines())]
-            deduped = []
+            lines = text.splitlines()
+            deduped: List[str] = []
             prev = None
             for ln in lines:
                 if ln != prev:
                     deduped.append(ln)
                 prev = ln
             cleaned = "\n".join(deduped).strip()
+
+            # If the entire content got duplicated (A + A), keep first half
+            if cleaned:
+                mid = len(cleaned) // 2
+                first_half = cleaned[:mid].strip()
+                second_half = cleaned[mid:].strip()
+                if first_half and first_half == second_half:
+                    cleaned = first_half
+
+            # Paragraph-level dedupe (handle repeated paragraphs with minor whitespace differences)
+            if cleaned:
+                paragraphs = [p.strip() for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
+                unique_paragraphs: List[str] = []
+                seen = set()
+                for p in paragraphs:
+                    key = " ".join(p.split())  # normalize whitespace
+                    if key not in seen:
+                        unique_paragraphs.append(p)
+                        seen.add(key)
+                cleaned = "\n\n".join(unique_paragraphs).strip()
+
             return cleaned or (content.strip() if content else "")
         except Exception:
             return content
@@ -231,7 +260,23 @@ TOOL RESPONSE FORMAT:
             
             response.raise_for_status()
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
+            # Defensive extraction of content and potential tool_calls
+            content = ""
+            choice = {}
+            message_obj = {}
+            try:
+                choices = data.get("choices") or []
+                if isinstance(choices, list) and choices:
+                    choice = choices[0] if isinstance(choices[0], dict) else {}
+                message_obj = (choice.get("message") or {}) if isinstance(choice, dict) else {}
+                content = (
+                    (message_obj.get("content") if isinstance(message_obj, dict) else "")
+                    or choice.get("text", "")
+                    or data.get("content", "")
+                    or data.get("text", "")
+                )
+            except Exception:
+                content = data.get("content", "") or ""
             
             if self.json_mode:
                 # For JSON mode, try to parse and return structured data
@@ -243,38 +288,68 @@ TOOL RESPONSE FORMAT:
                     # If parsing fails, wrap in JSON structure
                     content = json.dumps({"response": content})
             
-            # Import json for tool call parsing
-            import json
-            
             # Create chat generation with tool calling support
             message = AIMessage(content=content)
-            
-            # Try to parse tool calls from the response
+
+            # Tool-calling: prefer structured tool_calls if present, else parse from text
             if hasattr(self, '_tools') and self._tools:
-                tool_calls = self._parse_tool_calls(content)
-                if tool_calls:
-                    # Convert our format to LangChain's expected format
-                    langchain_tool_calls = []
-                    for tool_call in tool_calls:
-                        langchain_tool_calls.append({
-                            "name": tool_call["function"]["name"],
-                            "args": json.loads(tool_call["function"]["arguments"]),
-                            "id": tool_call["id"]
-                        })
-                    
-                    # Create AIMessage with tool calls directly
-                    # For tool calls, use empty content as recommended by LangChain
-                    message = AIMessage(
-                        content="",
-                        tool_calls=langchain_tool_calls
+                structured_calls = []
+                try:
+                    api_tool_calls = (
+                        (message_obj.get("tool_calls") if isinstance(message_obj, dict) else None)
+                        or choice.get("tool_calls")
+                        or data.get("tool_calls")
+                        or []
                     )
-                    # Tool call detected and formatted
-                    pass
+                    if isinstance(api_tool_calls, list) and api_tool_calls:
+                        for call in api_tool_calls:
+                            if isinstance(call, dict) and call.get("type") == "function" and "function" in call:
+                                func = call.get("function", {})
+                                arguments = func.get("arguments", "{}")
+                                try:
+                                    args_obj = json.loads(arguments) if isinstance(arguments, str) else (arguments or {})
+                                except Exception:
+                                    args_obj = {}
+                                # Normalize name by stripping incorrect prefixes like "tool."
+                                name = (func.get("name", "") or "")
+                                if name.startswith("tool."):
+                                    name = name[5:]
+                                structured_calls.append({
+                                    "name": name,
+                                    "args": args_obj,
+                                    "id": call.get("id", f"call_{len(structured_calls)}")
+                                })
+                except Exception:
+                    structured_calls = []
+
+                if structured_calls:
+                    # Backfill missing args when possible
+                    backfilled = self._backfill_missing_tool_args(structured_calls, messages)
+                    message = AIMessage(content="", tool_calls=backfilled)
                 else:
-                    # No tool call detected, this is a regular response
-                    # Sanitize to avoid leaking any tool JSON echoed by the model
-                    if message.content:
-                        message = AIMessage(content=self._sanitize_final_content(message.content))
+                    # Fallback: parse JSON-ish tool calls from text
+                    tool_calls = self._parse_tool_calls(content)
+                    if tool_calls:
+                        langchain_tool_calls = []
+                        for tool_call in tool_calls:
+                            # Strip any tool. prefix
+                            name = tool_call["function"].get("name", "")
+                            if name.startswith("tool."):
+                                name = name[5:]
+                            try:
+                                args_obj = json.loads(tool_call["function"].get("arguments", "{}"))
+                            except Exception:
+                                args_obj = {}
+                            langchain_tool_calls.append({
+                                "name": name,
+                                "args": args_obj,
+                                "id": tool_call.get("id", "")
+                            })
+                        backfilled = self._backfill_missing_tool_args(langchain_tool_calls, messages)
+                        message = AIMessage(content="", tool_calls=backfilled)
+                    else:
+                        if message.content:
+                            message = AIMessage(content=self._sanitize_final_content(message.content))
             
             generation = ChatGeneration(message=message)
             
@@ -646,6 +721,9 @@ TOOL RESPONSE FORMAT:
                 name = action_obj.get('action') or action_obj.get('name')
                 args = action_obj.get('action_input') or action_obj.get('arguments') or {}
                 if name:
+                    # Normalize name by stripping accidental "tool." prefix
+                    if isinstance(name, str) and name.startswith('tool.'):
+                        name = name[5:]
                     tool_calls.append({
                         'id': f'call_{len(tool_calls)}',
                         'type': 'function',
@@ -654,6 +732,81 @@ TOOL RESPONSE FORMAT:
                             'arguments': json.dumps(args if isinstance(args, dict) else {})
                         }
                     })
+
+            # Try whole content as JSON
+            try:
+                parsed = json.loads(content.strip())
+                if isinstance(parsed, dict):
+                    if 'actions' in parsed and isinstance(parsed['actions'], list):
+                        for act in parsed['actions']:
+                            if isinstance(act, dict):
+                                append_action(act)
+                        if tool_calls:
+                            return tool_calls
+                    if 'action' in parsed:
+                        append_action(parsed)
+                        if tool_calls:
+                            return tool_calls
+            except Exception:
+                pass
+
+            # Search JSON objects within text (greedy and fenced)
+            json_patterns = [
+                r'```json\s*(.*?)\s*```',
+                r'```\s*(.*?)\s*```',
+                r'\{[\s\S]*?\}'
+            ]
+            for pattern in json_patterns:
+                matches = re.findall(pattern, content, re.DOTALL | re.MULTILINE)
+                for match in matches:
+                    json_str = match.strip() if isinstance(match, str) else str(match)
+                    if not (json_str.startswith('{') and json_str.endswith('}')):
+                        continue
+                    try:
+                        parsed = json.loads(json_str)
+                        if isinstance(parsed, dict):
+                            if 'actions' in parsed and isinstance(parsed['actions'], list):
+                                for act in parsed['actions']:
+                                    if isinstance(act, dict):
+                                        append_action(act)
+                            elif 'action' in parsed:
+                                append_action(parsed)
+                    except Exception:
+                        continue
+            return tool_calls
+        except Exception:
+            return tool_calls
+
+    def _backfill_missing_tool_args(self, tool_calls: List[Dict[str, Any]], messages: List[BaseMessage]) -> List[Dict[str, Any]]:
+        """Heuristically fill missing required args for common tools from the latest user message.
+
+        - For evaluate_expression: if args missing or no 'expression', extract a simple math expression
+        """
+        try:
+            import re
+            # Get latest user message text
+            last_user = ""
+            for msg in reversed(messages):
+                from langchain_core.messages import HumanMessage
+                if isinstance(msg, HumanMessage):
+                    last_user = str(getattr(msg, 'content', '') or '')
+                    break
+            for call in tool_calls:
+                name = (call.get('name') or '').lower()
+                args = call.get('args') or {}
+                if 'evaluate' in name and ('expression' not in args or not args.get('expression')):
+                    # Simple expression extractor: numbers and + - * / ^ ()
+                    # Take the last occurrence to bias towards the final query
+                    candidates = re.findall(r"([\d\s\(\)\+\-\*\/\^\.]{3,})", last_user)
+                    if candidates:
+                        expr = candidates[-1].strip()
+                        expr = re.sub(r"\s+", "", expr)
+                        if expr:
+                            args['expression'] = expr
+                            call['args'] = args
+            return tool_calls
+        except Exception:
+            return tool_calls
 
             # Try whole content as JSON
             try:

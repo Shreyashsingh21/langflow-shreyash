@@ -9,7 +9,7 @@ __pycache__/
 build/
 dist/
 *.log
-
+.langflow-uat-env/
 # Virtual environments
 .venv/
 venv/
