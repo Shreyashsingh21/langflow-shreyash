@@ -32,6 +32,29 @@ class LocalChatModel(BaseChatModel):
     temperature: float = 0.7  
     max_tokens: int = 512  
     timeout: int = 60
+    def _sanitize_final_content(self, content: str) -> str:
+        """Remove leaked tool-call JSON and collapse duplicate consecutive lines."""
+        try:
+            import re
+            text = content or ""
+            # Remove fenced JSON blocks
+            text = re.sub(r"```json[\s\S]*?```", "", text, flags=re.MULTILINE)
+            text = re.sub(r"```[\s\S]*?```", "", text, flags=re.MULTILINE)
+            # Remove inline action JSON objects (single or batched)
+            text = re.sub(r"\{\s*\"actions\"\s*:\s*\[[\s\S]*?\]\s*\}", "", text)
+            text = re.sub(r"\{\s*\"action\"\s*:\s*\"[^\"]+\"[\s\S]*?\}", "", text)
+            # Collapse duplicate consecutive lines
+            lines = [ln for ln in (text.splitlines())]
+            deduped = []
+            prev = None
+            for ln in lines:
+                if ln != prev:
+                    deduped.append(ln)
+                prev = ln
+            cleaned = "\n".join(deduped).strip()
+            return cleaned or (content.strip() if content else "")
+        except Exception:
+            return content
     
     # Conservative context window for this endpoint (inputs + max_new_tokens)
     _context_limit: int = 4096
@@ -119,18 +142,18 @@ class LocalChatModel(BaseChatModel):
         # Add a general system instruction to handle tool results properly
         general_instruction = {
             "role": "system",
-            "content": """You are a helpful AI assistant. CRITICAL TOOL USAGE RULES:
+            "content": """You are a helpful AI assistant. TOOL USAGE POLICY:
 
-1. WHEN TO USE TOOLS: Only use tools when you need specific information you don't already have
-2. WHEN TO STOP: After receiving ANY tool response (successful or empty), ALWAYS provide a final answer to the user
-3. DO NOT ITERATE: Never use multiple tools in sequence or retry the same tool multiple times
-4. RESPONSE FORMAT: After any tool usage, your next response must be conversational text answering the user's question
+1. WHEN TO USE TOOLS: Use tools when they help you answer accurately.
+2. MULTIPLE TOOLS: You may call multiple tools in one round if they are independent. Prefer batching them as an array.
+3. ITERATIVE STEPS: It's OK to run tools, read results, then call more tools if needed.
+4. FINAL ANSWER: When you have enough information, provide a clear final answer.
+5. DO NOT MENTION TOOLS: Do not mention internal tool names or that you are calling a tool. Just answer with the result.
 
 TOOL RESPONSE HANDLING:
-- If tool returns useful data → Use it to answer the user's question directly
-- If tool returns empty/no results → Acknowledge this and provide alternative suggestions
-- NEVER ask for more tool usage after receiving a tool response
-- ALWAYS end with a helpful final answer to the user"""
+- If tool returns useful data → Use it directly in your reasoning and answer.
+- If tool returns empty/no results → Explain briefly and suggest alternatives.
+- Keep tool calls concise and only as needed."""
         }
         
         # Insert general instruction at the beginning
@@ -147,17 +170,11 @@ TOOL RESPONSE HANDLING:
 {tool_descriptions}
 
 TOOL USE INSTRUCTIONS:
-1. When you need to use a tool, respond with ONLY the JSON: {{"action": "tool_name", "action_input": {{"param_name": "value"}}}}
-2. Use the EXACT parameter names listed in the "Parameters:" section for each tool above
-3. For required parameters, you MUST provide them. Optional parameters can be omitted.
-4. When you don't need tools, respond with helpful conversational text
-5. The system will handle tool execution and provide you with results
-
-CRITICAL STOPPING RULE:
-- AFTER ANY TOOL EXECUTION: Your next response MUST be conversational text answering the user's question
-- DO NOT use another tool after receiving a tool response
-- DO NOT retry failed tools - provide alternatives instead
-- ALWAYS provide a final helpful answer to the user after tool usage
+1. Single call: {{"action": "tool_name", "action_input": {{"param_name": "value"}}}}
+2. Batch multiple calls: {{"actions": [{{"action": "toolA", "action_input": {{...}}}}, {{"action": "toolB", "action_input": {{...}}}}]}}
+3. Use the EXACT parameter names listed in the Parameters for each tool.
+4. Required parameters MUST be provided; optional can be omitted.
+5. When tools are not needed, respond with normal conversational text. DO NOT echo any JSON tool call in your final answer. DO NOT mention tools or that you used one; just provide the answer.
 
 PARAMETER MATCHING RULES:
 - If you see "input_value" in parameters → use "input_value"
@@ -166,12 +183,12 @@ PARAMETER MATCHING RULES:
 - Always match the exact parameter name from the tool description
 
 EXAMPLE WORKFLOW:
-1. User asks question → Use tool if needed: {{"action": "ToolName", "action_input": {{"param": "value"}}}}
-2. Tool returns result → Provide conversational answer: "Based on the search results, I found..."
-3. STOP - No more tool usage
+1. User asks question → If multiple independent lookups: {{"actions": [ ... ]}}
+2. Tools return results → If more info needed, call another tool; otherwise answer. Final answer must be clean prose without JSON.
 
 TOOL RESPONSE FORMAT:
-{{"action": "ToolName", "action_input": {{"exact_param_from_description": "your_value"}}}}"""
+{{"action": "ToolName", "action_input": {{"exact_param_from_description": "your_value"}}}} OR
+{{"actions": [{{"action": "ToolA", "action_input": {{...}}}}, {{"action": "ToolB", "action_input": {{...}}}}]}}"""
                 }
                 # Insert tool message at the beginning (after any existing system message)
                 if api_messages and api_messages[0]["role"] == "system":
@@ -255,7 +272,9 @@ TOOL RESPONSE FORMAT:
                     pass
                 else:
                     # No tool call detected, this is a regular response
-                    pass
+                    # Sanitize to avoid leaking any tool JSON echoed by the model
+                    if message.content:
+                        message = AIMessage(content=self._sanitize_final_content(message.content))
             
             generation = ChatGeneration(message=message)
             
@@ -409,11 +428,11 @@ TOOL RESPONSE FORMAT:
                     # Default to user message for unknown types
                     api_messages.append({"role": "user", "content": content})
         
-        # If we detected a tool response, add a strong reminder
+        # If we detected a tool response, add a gentle controller note allowing follow-ups
         if has_tool_response and api_messages:
             api_messages.append({
                 "role": "system", 
-                "content": "REMINDER: A tool response was provided above. You MUST now provide a final conversational answer to the user. DO NOT use any more tools."
+                "content": "CONTROLLER: A tool response was provided above. You may either (a) call additional tools if still needed (output ONLY JSON for actions), or (b) provide a clear final answer. Do NOT include tool-call JSON in the final prose answer."
             })
         
         return api_messages
@@ -615,82 +634,70 @@ TOOL RESPONSE FORMAT:
             return ' | Parameters: check tool documentation for required parameters'
     
     def _parse_tool_calls(self, content: str) -> List[Dict[str, Any]]:
-        """Parse tool calls from the model response."""
-        tool_calls = []
+        """Parse one or multiple tool calls from model response.
+        Supports single action {action, action_input} and batched {actions: [{action,...}, ...]}.
+        """
+        tool_calls: List[Dict[str, Any]] = []
         try:
             import json
             import re
-            
-            # First, try to parse the entire content as JSON (most common case)
-            content_stripped = content.strip()
-            try:
-                parsed_content = json.loads(content_stripped)
-                if isinstance(parsed_content, dict) and 'action' in parsed_content:
+
+            def append_action(action_obj):
+                name = action_obj.get('action') or action_obj.get('name')
+                args = action_obj.get('action_input') or action_obj.get('arguments') or {}
+                if name:
                     tool_calls.append({
                         'id': f'call_{len(tool_calls)}',
                         'type': 'function',
                         'function': {
-                            'name': parsed_content['action'],
-                            'arguments': json.dumps(parsed_content.get('action_input', {}))
+                            'name': name,
+                            'arguments': json.dumps(args if isinstance(args, dict) else {})
                         }
                     })
-                    return tool_calls
-            except json.JSONDecodeError:
+
+            # Try whole content as JSON
+            try:
+                parsed = json.loads(content.strip())
+                if isinstance(parsed, dict):
+                    if 'actions' in parsed and isinstance(parsed['actions'], list):
+                        for act in parsed['actions']:
+                            if isinstance(act, dict):
+                                append_action(act)
+                        if tool_calls:
+                            return tool_calls
+                    if 'action' in parsed:
+                        append_action(parsed)
+                        if tool_calls:
+                            return tool_calls
+            except Exception:
                 pass
-            
-            # Try to extract JSON from mixed text (fallback for when model includes explanation)
-            # Use greedy pattern to capture full JSON object
-            json_in_text_pattern = r'\{.*\}'
-            json_matches = re.findall(json_in_text_pattern, content, re.DOTALL)
-            for json_match in json_matches:
-                try:
-                    parsed = json.loads(json_match)
-                    if isinstance(parsed, dict) and 'action' in parsed:
-                        tool_calls.append({
-                            'id': f'call_{len(tool_calls)}',
-                            'type': 'function',
-                            'function': {
-                                'name': parsed['action'],
-                                'arguments': json.dumps(parsed.get('action_input', {}))
-                            }
-                        })
-                        return tool_calls
-                except json.JSONDecodeError:
-                    continue
-            
-            # Try to find JSON blocks in the response
+
+            # Search JSON objects within text (greedy and fenced)
             json_patterns = [
                 r'```json\s*(.*?)\s*```',
                 r'```\s*(.*?)\s*```',
-                r'\{[^{}]*"action"[^{}]*\}',  # More specific pattern for action objects
-                r'\{.*?\}'
+                r'\{[\s\S]*?\}'
             ]
-            
             for pattern in json_patterns:
                 matches = re.findall(pattern, content, re.DOTALL | re.MULTILINE)
                 for match in matches:
-                    json_str = match.strip() if isinstance(match, str) else match
-                    if json_str and json_str.startswith('{') and json_str.endswith('}'):
-                        try:
-                            parsed = json.loads(json_str)
-                            if isinstance(parsed, dict) and 'action' in parsed:
-                                tool_calls.append({
-                                    'id': f'call_{len(tool_calls)}',
-                                    'type': 'function',
-                                    'function': {
-                                        'name': parsed['action'],
-                                        'arguments': json.dumps(parsed.get('action_input', {}))
-                                    }
-                                })
-                        except json.JSONDecodeError:
-                            continue
-                if tool_calls:  # If we found tool calls, return them
-                    break
-                
-        except Exception as e:
-            pass  # Silently fail tool call parsing
-        
-        return tool_calls
+                    json_str = match.strip() if isinstance(match, str) else str(match)
+                    if not (json_str.startswith('{') and json_str.endswith('}')):
+                        continue
+                    try:
+                        parsed = json.loads(json_str)
+                        if isinstance(parsed, dict):
+                            if 'actions' in parsed and isinstance(parsed['actions'], list):
+                                for act in parsed['actions']:
+                                    if isinstance(act, dict):
+                                        append_action(act)
+                            elif 'action' in parsed:
+                                append_action(parsed)
+                    except Exception:
+                        continue
+            return tool_calls
+        except Exception:
+            return tool_calls
 
 
 # Langflow Component

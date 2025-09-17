@@ -70,6 +70,21 @@ class AgentComponent(ToolCallingAgentComponent):
         # removed memory inputs from agent component
         # *memory_inputs,
         BoolInput(
+            name="enable_parallel_tool_calls",
+            display_name="Enable Parallel Tool Calls",
+            advanced=True,
+            info="If true, the agent will attempt to execute multiple tool calls concurrently when possible.",
+            value=False,
+        ),
+        IntInput(
+            name="parallel_tool_concurrency",
+            display_name="Max Parallel Tools",
+            value=3,
+            info="Maximum number of tools to execute concurrently when parallel tool calls are enabled.",
+            advanced=True,
+            show=True,
+        ),
+        BoolInput(
             name="add_current_date_tool",
             display_name="Current Date",
             advanced=True,
@@ -112,6 +127,13 @@ class AgentComponent(ToolCallingAgentComponent):
                 input_value=self.input_value,
                 system_prompt=self.system_prompt,
             )
+            # Expose parallel tool execution preferences to the underlying agent/runtime
+            try:
+                self.parallel_tool_calls = bool(getattr(self, "enable_parallel_tool_calls", False))
+                self.parallel_tool_concurrency = int(getattr(self, "parallel_tool_concurrency", 3))
+            except Exception:
+                self.parallel_tool_calls = False
+                self.parallel_tool_concurrency = 3
             agent = self.create_agent_runnable()
             return await self.run_agent(agent)
 
@@ -206,6 +228,8 @@ class AgentComponent(ToolCallingAgentComponent):
             "input_value",
             "add_current_date_tool",
             "system_prompt",
+            "enable_parallel_tool_calls",
+            "parallel_tool_concurrency",
         ]:
             if key not in build_config:
                 continue
