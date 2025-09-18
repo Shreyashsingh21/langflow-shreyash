@@ -34,7 +34,7 @@ class LocalChatModel(BaseChatModel):
     model_name: str = MODEL_NAME_HARDCODED
     json_mode: bool = False
     temperature: float = 0.3  # Lower temperature for faster, more deterministic responses
-    max_tokens: int = 256  # Reduced for faster responses
+    max_tokens: int = 8192  # Set to 8192 for larger context
     timeout: int = 60  # Allow slower local servers
     _session: Optional[requests.Session] = None
     def _sanitize_final_content(self, content: str) -> str:
@@ -900,8 +900,8 @@ class GPTOSSModelComponent(LCModelComponent):
         IntInput(
             name="max_tokens",
             display_name="Max Tokens",
-            info="Maximum number of tokens to generate in the response. Lower values = faster responses.",
-            value=256,
+            info="Maximum number of tokens to generate in the response. Set to 8192 for larger context.",
+            value=8192,
             advanced=False,
         ),
         IntInput(

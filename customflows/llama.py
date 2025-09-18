@@ -30,7 +30,7 @@ class LocalChatModel(BaseChatModel):
     model_name: str = MODEL_NAME_HARDCODED
     json_mode: bool = False
     temperature: float = 0.7  
-    max_tokens: int = 512  
+    max_tokens: int = 8192  # Set to 8192 for larger context
     timeout: int = 60
     def _sanitize_final_content(self, content: str) -> str:
         """Remove leaked tool-call JSON and collapse duplicate text.
@@ -85,8 +85,8 @@ class LocalChatModel(BaseChatModel):
         except Exception:
             return content
     
-    # Conservative context window for this endpoint (inputs + max_new_tokens)
-    _context_limit: int = 4096
+    # Context window for this endpoint (inputs + max_new_tokens)
+    _context_limit: int = 8192
     
     def _estimate_tokens(self, messages: List[BaseMessage]) -> int:
         """Rough token estimate: chars/4 heuristic across all message contents."""
@@ -881,8 +881,8 @@ class LlamaLocalLLMComponent(LCModelComponent):
         IntInput(
             name="max_tokens",
             display_name="Max Tokens",
-            info="Maximum number of tokens to generate in the response.",
-            value=512,
+            info="Maximum number of tokens to generate in the response. Set to 8192 for larger context.",
+            value=8192,
             advanced=False,
         ),
         IntInput(
