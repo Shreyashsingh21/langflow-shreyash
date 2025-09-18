@@ -22,8 +22,8 @@ try:
 except ImportError:
     pass  # Ignore if not available
 
-API_BASE_URL = "https://gptoss-api.trinka.ai/gpt-oss-20B_chat"
-MODEL_NAME_HARDCODED = "gpt-oss:20b"
+API_BASE_URL = os.environ.get("GPTOSS_API_BASE", "https://gptoss-api.trinka.ai/gpt-oss-20B_chat")
+MODEL_NAME_HARDCODED = os.environ.get("GPTOSS_MODEL", "gpt-oss:20b")
 
 
 # Custom LangChain Chat Model Wrapper for Local LLM
@@ -87,6 +87,24 @@ class LocalChatModel(BaseChatModel):
         
         # Convert LangChain messages to API format
         api_messages = self._convert_messages_to_api_format(messages)
+        # Build minimal variants of messages for stricter providers
+        minimal_messages: List[Dict[str, str]] = []
+        system_texts: List[str] = []
+        try:
+            for m in api_messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if role == "system":
+                    system_texts.append(content)
+                    continue
+                if role not in ("user", "assistant"):
+                    role = "user"
+                minimal_messages.append({"role": role, "content": content})
+        except Exception:
+            minimal_messages = api_messages
+
+        # Optional: strict mode to avoid injecting extra system/tool instructions
+        strict_messages = os.environ.get("GPTOSS_STRICT_MESSAGES", "0") == "1"
         
         # Add a concise system instruction that still allows comprehensive, multi-tool answers
         general_instruction = {
@@ -94,11 +112,12 @@ class LocalChatModel(BaseChatModel):
             "content": """You are a helpful AI assistant. Use tools when needed to answer accurately and comprehensively. You may call multiple tools and iterate when useful. Synthesize information from all tools into a clear final answer. Do not mention tool names in final answers."""
         }
         
-        # Insert general instruction at the beginning
-        api_messages.insert(0, general_instruction)
+        # Insert general instruction at the beginning unless strict
+        if not strict_messages:
+            api_messages.insert(0, general_instruction)
         
         # Add tool information if tools are bound
-        if hasattr(self, '_tools') and self._tools:
+        if (not strict_messages) and hasattr(self, '_tools') and self._tools:
             tool_descriptions = self._format_tools_for_prompt()
             if tool_descriptions:
                 # Add tool information to the system message or as a separate message
@@ -132,14 +151,99 @@ EXAMPLE WORKFLOW:
                 else:
                     api_messages.insert(0, tool_message)
         
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer token-abc123"}
-        payload = {
+        # Build headers with API key support
+        api_key = os.environ.get("GPTOSS_API_KEY") or os.environ.get("TRINKA_API_KEY")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if api_key:
+            # Try both common auth header styles
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["x-api-key"] = api_key
+
+        # Prepare multiple payload variants to handle provider schema quirks
+        payload_variants: List[Dict[str, Any]] = []
+
+        # Variant A: OpenAI-like (default)
+        payload_variants.append({
             "model": self.model_name,
             "messages": api_messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "stop": stop or [],
-        }
+            "stream": False,
+        })
+
+        # Variant B: same as A but omit model (some providers fix model server-side)
+        payload_variants.append({
+            "messages": api_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stop": stop or [],
+            "stream": False,
+        })
+
+        # Variant C: alternative keys used by some backends
+        payload_variants.append({
+            "messages": api_messages,
+            "temperature": self.temperature,
+            "max_new_tokens": self.max_tokens,
+            "stream": False,
+        })
+
+        # Variant D: generic "input" wrapper
+        payload_variants.append({
+            "input": api_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        })
+
+        # Variant E: minimal messages only (drop system)
+        payload_variants.append({
+            "messages": minimal_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        })
+
+        # Variant F: minimal messages with model
+        payload_variants.append({
+            "model": self.model_name,
+            "messages": minimal_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        })
+
+        # Variant G: prompt string (concatenate)
+        try:
+            prompt_lines: List[str] = []
+            if system_texts:
+                prompt_lines.append("\n\n".join(system_texts))
+            for m in minimal_messages:
+                prompt_lines.append(f"{m.get('role','user')}: {m.get('content','')}")
+            prompt_text = "\n".join(prompt_lines).strip()
+        except Exception:
+            prompt_text = ""
+        if prompt_text:
+            payload_variants.append({
+                "prompt": prompt_text,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            })
+
+        # Variant H: inputs schema used by some inference servers
+        if prompt_text:
+            payload_variants.append({
+                "inputs": {
+                    "past_user_inputs": [],
+                    "generated_responses": [],
+                    "text": prompt_text,
+                },
+                "parameters": {
+                    "temperature": self.temperature,
+                    "max_new_tokens": self.max_tokens,
+                }
+            })
         
         try:
             # Use session with connection pooling for better performance
@@ -155,25 +259,52 @@ EXAMPLE WORKFLOW:
                 self._session.mount("http://", adapter)
                 self._session.mount("https://", adapter)
             
-            # Log outgoing request (without auth header)
-            self._debug("Requesting completion", {"url": self.api_base, "payload": payload})
-            # Use separate connect/read timeouts: faster connect, generous read
+            # Try each payload variant until one succeeds (non-4xx or specifically not 422)
             request_timeout = (10, self.timeout)
-            try:
-                response = self._session.post(self.api_base, headers=headers, json=payload, timeout=request_timeout)
-            except requests.exceptions.ReadTimeout:
-                # Retry once with reduced max_tokens and extended timeout to salvage slow generations
-                reduced_payload = dict(payload)
-                reduced_payload["max_tokens"] = max(64, int(self.max_tokens / 2))
-                self._debug("Read timeout. Retrying with reduced max_tokens and longer timeout", reduced_payload["max_tokens"])
-                response = self._session.post(self.api_base, headers=headers, json=reduced_payload, timeout=(10, self.timeout * 2))
+            last_response = None
+            last_error_body: Optional[str] = None
+            for idx, payload in enumerate(payload_variants):
+                # Log outgoing request (without auth header)
+                self._debug("Requesting completion", {"url": self.api_base, "variant": idx, "payload": payload})
+                try:
+                    response = self._session.post(self.api_base, headers=headers, json=payload, timeout=request_timeout)
+                except requests.exceptions.ReadTimeout:
+                    # Retry once with reduced tokens and extended timeout
+                    reduced_payload = dict(payload)
+                    if "max_tokens" in reduced_payload:
+                        reduced_payload["max_tokens"] = max(64, int(self.max_tokens / 2))
+                    if "max_new_tokens" in reduced_payload:
+                        reduced_payload["max_new_tokens"] = max(64, int(self.max_tokens / 2))
+                    self._debug("Read timeout. Retrying with reduced tokens and longer timeout", reduced_payload.get("max_tokens", reduced_payload.get("max_new_tokens", None)))
+                    response = self._session.post(self.api_base, headers=headers, json=reduced_payload, timeout=(10, self.timeout * 2))
+
+                last_response = response
+                self._debug("Response status", response.status_code)
+                try:
+                    self._debug("Raw response text", response.text[:4000])
+                    if response.status_code >= 400:
+                        last_error_body = response.text
+                except Exception:
+                    pass
+
+                # If not 422, or success, break and handle
+                if response.status_code != 422:
+                    break
+
+            # If we tried multiple and still have a response, raise for status here
+            response = last_response if last_response is not None else response
             self._debug("Response status", response.status_code)
             # Try to log JSON or raw text
             try:
                 self._debug("Raw response text", response.text[:4000])
             except Exception:
                 pass
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except Exception as e:
+                # Surface the server error body to the user for faster debugging
+                details = (last_error_body or getattr(response, 'text', '') or "").strip()
+                raise type(e)(f"{str(e)} | body: {details[:800]}")
             data = {}
             try:
                 data = response.json()
@@ -424,16 +555,49 @@ EXAMPLE WORKFLOW:
         api_messages = []
         has_tool_response = False
         
+        def normalize_content(raw: Any) -> str:
+            try:
+                if raw is None:
+                    return ""
+                if isinstance(raw, list):
+                    parts: List[str] = []
+                    for part in raw:
+                        if isinstance(part, dict):
+                            if isinstance(part.get("text"), str):
+                                parts.append(part["text"])
+                            elif isinstance(part.get("content"), str):
+                                parts.append(part["content"])
+                            else:
+                                parts.append(str(part))
+                        else:
+                            parts.append(str(part))
+                    return "\n".join([p for p in parts if p]).strip()
+                if isinstance(raw, dict):
+                    if isinstance(raw.get("text"), str):
+                        return raw["text"]
+                    if isinstance(raw.get("content"), str):
+                        return raw["content"]
+                    try:
+                        return json.dumps(raw, ensure_ascii=False)
+                    except Exception:
+                        return str(raw)
+                return str(raw)
+            except Exception:
+                try:
+                    return str(raw)
+                except Exception:
+                    return ""
+
         for message in messages:
             if isinstance(message, SystemMessage):
-                api_messages.append({"role": "system", "content": message.content})
+                api_messages.append({"role": "system", "content": normalize_content(message.content)})
             elif isinstance(message, HumanMessage):
-                api_messages.append({"role": "user", "content": message.content})
+                api_messages.append({"role": "user", "content": normalize_content(message.content)})
             elif isinstance(message, AIMessage):
-                api_messages.append({"role": "assistant", "content": message.content})
+                api_messages.append({"role": "assistant", "content": normalize_content(message.content)})
             else:
                 # Check if this is a tool result message
-                content = str(message.content)
+                content = normalize_content(message.content)
                 if any(indicator in content.lower() for indicator in ['tool result:', 'search result:', 'function result:', 'output:']):
                     has_tool_response = True
                     # Encourage comprehensive synthesis and allow additional tool calls if needed
@@ -479,23 +643,15 @@ EXAMPLE WORKFLOW:
         tools: List[Union[Dict[str, Any], type, BaseTool]],
         **kwargs: Any,
     ) -> "LocalChatModel":
-        """Bind tools to the model for tool calling."""
-        # Tools being bound to model
-        pass
-        
-        # Create a new instance with the same parameters but with tools bound
-        bound_model = LocalChatModel(
-            api_base=self.api_base,
-            model_name=self.model_name,
-            json_mode=self.json_mode,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            timeout=self.timeout,
-        )
-        # Store the tools on the model instance
-        bound_model._bound_tools = tools
-        # Model bound with tools successfully
-        return bound_model
+        """Bind tools to the model for tool calling.
+        Mutates current instance to ensure agent uses the same model with tools.
+        """
+        try:
+            self._tools = tools
+        except Exception:
+            # Fallback attribute set
+            setattr(self, "_tools", tools)
+        return self
     
     @property
     def _bound_tools(self) -> List[Union[Dict[str, Any], type, BaseTool]]:

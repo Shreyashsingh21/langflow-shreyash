@@ -171,8 +171,15 @@ class LocalChatModel(BaseChatModel):
         # Add a general system instruction to handle tool results properly
         general_instruction = {
             "role": "system",
-            "content": """You are a helpful AI assistant. TOOL USAGE POLICY:
+            "content": """You are a helpful AI assistant. CRITICAL: You MUST use tools when available. Do NOT answer questions directly if tools can help.
 
+MANDATORY TOOL USAGE:
+- For time/date questions → ALWAYS call get_current_date tool
+- For math/arithmetic → ALWAYS call evaluate_expression tool  
+- For search/research/paper queries → ALWAYS call fetch_content_dataframe tool
+- NEVER compute math in your head or guess dates
+
+TOOL USAGE POLICY:
 1. WHEN TO USE TOOLS: Use tools when they help you answer accurately.
 2. MULTIPLE TOOLS: You may call multiple tools in one round if they are independent. Prefer batching them as an array.
 3. ITERATIVE STEPS: It's OK to run tools, read results, then call more tools if needed.
@@ -198,26 +205,37 @@ TOOL RESPONSE HANDLING:
                     "content": f"""You have access to the following tools:
 {tool_descriptions}
 
+CRITICAL: You MUST use tools for time, math, and search questions. Do NOT answer directly.
+
+MANDATORY TOOL USAGE:
+- Time/date questions → get_current_date
+- Math/arithmetic → evaluate_expression with {{"expression": "..."}}
+- Search/research → fetch_content_dataframe with {{"search_query": "..."}}
+
 TOOL USE INSTRUCTIONS:
-1. Single call: {{"action": "tool_name", "action_input": {{"param_name": "value"}}}}
-2. Batch multiple calls: {{"actions": [{{"action": "toolA", "action_input": {{...}}}}, {{"action": "toolB", "action_input": {{...}}}}]}}
-3. Use the EXACT parameter names listed in the Parameters for each tool.
-4. Required parameters MUST be provided; optional can be omitted.
-5. When tools are not needed, respond with normal conversational text. DO NOT echo any JSON tool call in your final answer. DO NOT mention tools or that you used one; just provide the answer.
+- Call multiple tools in one step using "actions" array when possible
+- Match parameter names EXACTLY as listed in Parameters
+- Provide all required parameters; optional may be omitted
+- Do not include tool-call JSON in final prose answer
 
-PARAMETER MATCHING RULES:
-- If you see "input_value" in parameters → use "input_value"
-- If you see "search_query" in parameters → use "search_query"  
-- If you see "url" in parameters → use "url"
-- Always match the exact parameter name from the tool description
+JSON FORMATS:
+- Single: {{"action": "ToolName", "action_input": {{"param": "value"}}}}
+- Batch: {{"actions": [{{"action": "ToolA", "action_input": {{...}}}}, {{"action": "ToolB", "action_input": {{...}}}}]}}
 
-EXAMPLE WORKFLOW:
-1. User asks question → If multiple independent lookups: {{"actions": [ ... ]}}
-2. Tools return results → If more info needed, call another tool; otherwise answer. Final answer must be clean prose without JSON.
+PARAMETER MAPPING:
+- "query", "search_query", "srsearch" → user's query text
+- "expression" → mathematical expression from user
+- "url" → URL from user
+- "input_value" → user's message when unsure
 
-TOOL RESPONSE FORMAT:
-{{"action": "ToolName", "action_input": {{"exact_param_from_description": "your_value"}}}} OR
-{{"actions": [{{"action": "ToolA", "action_input": {{...}}}}, {{"action": "ToolB", "action_input": {{...}}}}]}}"""
+EXAMPLE for "tell me current time and 2+3 and about attention paper":
+{{"actions": [
+  {{"action": "get_current_date", "action_input": {{}}}},
+  {{"action": "evaluate_expression", "action_input": {{"expression": "2+3"}}}},
+  {{"action": "fetch_content_dataframe", "action_input": {{"search_query": "attention paper"}}}}
+]}}
+
+After tools return, provide clean final answer without JSON."""
                 }
                 # Insert tool message at the beginning (after any existing system message)
                 if api_messages and api_messages[0]["role"] == "system":
@@ -531,23 +549,14 @@ TOOL RESPONSE FORMAT:
         tools: List[Union[Dict[str, Any], type, BaseTool]],
         **kwargs: Any,
     ) -> "LocalChatModel":
-        """Bind tools to the model for tool calling."""
-        # Tools being bound to model
-        pass
-        
-        # Create a new instance with the same parameters but with tools bound
-        bound_model = LocalChatModel(
-            api_base=self.api_base,
-            model_name=self.model_name,
-            json_mode=self.json_mode,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            timeout=self.timeout,
-        )
-        # Store the tools on the model instance
-        bound_model._bound_tools = tools
-        # Model bound with tools successfully
-        return bound_model
+        """Bind tools to the model for tool calling.
+        Mutates current instance to ensure agent uses the same model with tools.
+        """
+        try:
+            self._tools = tools
+        except Exception:
+            setattr(self, "_tools", tools)
+        return self
     
     @property
     def _bound_tools(self) -> List[Union[Dict[str, Any], type, BaseTool]]:
@@ -778,76 +787,77 @@ TOOL RESPONSE FORMAT:
             return tool_calls
 
     def _backfill_missing_tool_args(self, tool_calls: List[Dict[str, Any]], messages: List[BaseMessage]) -> List[Dict[str, Any]]:
-        """Heuristically fill missing required args for common tools from the latest user message.
+        """Heuristically fill missing args from the latest user message using generic rules.
 
-        - For evaluate_expression: if args missing or no 'expression', extract a simple math expression
+        - Infer likely parameters by name: query/search_query/srsearch/url/expression/input_value
+        - Use the latest user text as the default source when appropriate
+        - Do not hardcode tool names; rely on parameter names and schemas when available
         """
         try:
             import re
-            # Get latest user message text
             last_user = ""
             for msg in reversed(messages):
                 from langchain_core.messages import HumanMessage
                 if isinstance(msg, HumanMessage):
                     last_user = str(getattr(msg, 'content', '') or '')
                     break
-            for call in tool_calls:
-                name = (call.get('name') or '').lower()
-                args = call.get('args') or {}
-                if 'evaluate' in name and ('expression' not in args or not args.get('expression')):
-                    # Simple expression extractor: numbers and + - * / ^ ()
-                    # Take the last occurrence to bias towards the final query
-                    candidates = re.findall(r"([\d\s\(\)\+\-\*\/\^\.]{3,})", last_user)
-                    if candidates:
-                        expr = candidates[-1].strip()
-                        expr = re.sub(r"\s+", "", expr)
-                        if expr:
-                            args['expression'] = expr
-                            call['args'] = args
-            return tool_calls
-        except Exception:
-            return tool_calls
 
-            # Try whole content as JSON
+            # Build a quick map of tool name -> required parameter hints if available
+            schema_hints: Dict[str, List[str]] = {}
             try:
-                parsed = json.loads(content.strip())
-                if isinstance(parsed, dict):
-                    if 'actions' in parsed and isinstance(parsed['actions'], list):
-                        for act in parsed['actions']:
-                            if isinstance(act, dict):
-                                append_action(act)
-                        if tool_calls:
-                            return tool_calls
-                    if 'action' in parsed:
-                        append_action(parsed)
-                        if tool_calls:
-                            return tool_calls
+                if hasattr(self, '_tools') and self._tools:
+                    for t in self._tools:
+                        name = getattr(t, 'name', None)
+                        if not name and isinstance(t, dict):
+                            name = t.get('name')
+                        if not name:
+                            continue
+                        params: List[str] = []
+                        # args_schema for BaseTool
+                        if hasattr(t, 'args_schema') and t.args_schema:
+                            try:
+                                schema = t.args_schema.schema()
+                                props = (schema or {}).get('properties', {})
+                                params.extend(list(props.keys()))
+                            except Exception:
+                                pass
+                        # dict-based tool schema
+                        if isinstance(t, dict):
+                            for key in ['parameters', 'args_schema', 'schema', 'inputs']:
+                                if key in t and isinstance(t[key], dict):
+                                    props = t[key].get('properties') or t[key]
+                                    if isinstance(props, dict):
+                                        params.extend(list(props.keys()))
+                        schema_hints[name.lower()] = list(dict.fromkeys(params))
             except Exception:
-                pass
+                schema_hints = {}
 
-            # Search JSON objects within text (greedy and fenced)
-            json_patterns = [
-                r'```json\s*(.*?)\s*```',
-                r'```\s*(.*?)\s*```',
-                r'\{[\s\S]*?\}'
-            ]
-            for pattern in json_patterns:
-                matches = re.findall(pattern, content, re.DOTALL | re.MULTILINE)
-                for match in matches:
-                    json_str = match.strip() if isinstance(match, str) else str(match)
-                    if not (json_str.startswith('{') and json_str.endswith('}')):
-                        continue
-                    try:
-                        parsed = json.loads(json_str)
-                        if isinstance(parsed, dict):
-                            if 'actions' in parsed and isinstance(parsed['actions'], list):
-                                for act in parsed['actions']:
-                                    if isinstance(act, dict):
-                                        append_action(act)
-                            elif 'action' in parsed:
-                                append_action(parsed)
-                    except Exception:
-                        continue
+            for call in tool_calls:
+                name = (call.get('name') or '')
+                args = call.get('args') or {}
+                lowered = name.lower()
+                hinted_params = schema_hints.get(lowered, [])
+
+                # If expression-like param exists and is empty, try to extract math expression
+                if any(p in hinted_params or p in args for p in ['expression']):
+                    if not args.get('expression') and last_user:
+                        candidates = re.findall(r"([\d\s\(\)\+\-\*\/\^\.]{3,})", last_user)
+                        if candidates:
+                            expr = candidates[-1].strip()
+                            expr = re.sub(r"\s+", "", expr)
+                            if expr:
+                                args['expression'] = expr
+
+                # If query-like parameters exist, set from last_user
+                for qparam in ['search_query', 'srsearch', 'query']:
+                    if (qparam in hinted_params or qparam in args) and not args.get(qparam) and last_user:
+                        args[qparam] = last_user
+
+                # Fallback: input_value
+                if (('input_value' in hinted_params) or ('input_value' in args)) and not args.get('input_value') and last_user:
+                    args['input_value'] = last_user
+
+                call['args'] = args
             return tool_calls
         except Exception:
             return tool_calls
