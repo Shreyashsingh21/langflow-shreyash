@@ -4,13 +4,25 @@ from langflow.io import (
     Output
 )
 from langflow.schema.message import Message
-from langchain.tools import Tool
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field
+from typing import Type
 
 import base64
 import json
 import time
 import re
 import requests
+
+
+class TicketContextInput(BaseModel):
+    """Input schema for the ticket context tool."""
+    action: str = Field(description="The action name")
+    action_input: dict = Field(description="The action input containing ticket_id")
+    
+    def get_ticket_id(self) -> str:
+        """Extract ticket_id from action_input."""
+        return str(self.action_input.get('ticket_id', ''))
 
 
 class TrinkaSupportTicketContext(Component):
@@ -20,19 +32,18 @@ class TrinkaSupportTicketContext(Component):
     category = "tools"
 
     inputs = [
-        StrInput(name="ticket_id", display_name="Ticket ID", required=True),
+        StrInput(name="ticket_id", display_name="Ticket ID", required=False),
         IntInput(name="ticket_count", display_name="Ticket Count", value=5),
         TabInput(name="mode", display_name="Mode", options=["Parser", "Stringify"], value="Stringify"),
     ]
 
     outputs = [
         Output(name="ticket_context", display_name="Ticket Context", method="build"),
-        Output(name="tool", display_name="Tool", method="build_tool"),
+        Output(name="tool", display_name="Tool", method="build_tool", types=["Tool"]),
     ]
 
     FRESHDESK_DOMAIN = "trinka.freshdesk.com"
     API_KEY = "Vs3cRt89YV2MX6sT7Dvw"
-    pattern = "Text: {text}"
 
     def _auth_headers(self):
         auth = f"{self.API_KEY}:X"
@@ -113,35 +124,49 @@ class TrinkaSupportTicketContext(Component):
         except Exception as e:
             return {"error": str(e)}
 
-    def build(self) -> Message:
+    def _fetch_ticket_context(self, ticket_id: str) -> str:
+        """Internal method to fetch ticket context - used by both build methods."""
         try:
-            ticket_id = self.ticket_id
             if not ticket_id:
-                return Message(text="No ticket ID provided.")
-
+                return json.dumps({"error": "No ticket ID provided"})
+            
             requester_id = self._get_requester_id(ticket_id)
             tickets_json = self._get_tickets_with_conversations(requester_id, self.ticket_count)
             context_data = self._generate_context(tickets_json)
-
-            return Message(text=json.dumps(context_data, indent=2))
+            return json.dumps(context_data, indent=2)
         except Exception as e:
-            return Message(text=f"Unhandled Exception: {str(e)}")
+            return json.dumps({"error": f"Exception: {str(e)}"})
 
-    def build_tool(self) -> Tool:
-        def tool_func(ticket_id: str) -> str:
-            try:
-                if not ticket_id:
-                    return "Error: No ticket ID provided"
+    def build(self) -> Message:
+        """Build method for direct component usage."""
+        if not self.ticket_id:
+            return Message(text=json.dumps({"error": "No ticket ID provided"}))
+        
+        result = self._fetch_ticket_context(self.ticket_id)
+        return Message(text=result)
+
+    def build_tool(self) -> StructuredTool:
+        """Build method that returns a StructuredTool for agent usage."""
+        
+        def fetch_context(action: str, action_input: dict) -> str:
+            """Fetch Freshdesk ticket context including related tickets and conversations.
+            
+            Args:
+                action: The action name
+                action_input: The action input containing ticket_id
                 
-                requester_id = self._get_requester_id(ticket_id)
-                tickets_json = self._get_tickets_with_conversations(requester_id, 5)
-                context_data = self._generate_context(tickets_json)
-                return json.dumps(context_data, indent=2)
-            except Exception as e:
-                return f"Tool Error: {str(e)}"
+            Returns:
+                JSON string containing ticket context data
+            """
+            ticket_id = str(action_input.get('ticket_id', ''))
+            if not ticket_id:
+                return json.dumps({"error": "No ticket ID provided"})
+                
+            return self._fetch_ticket_context(ticket_id)
 
-        return Tool(
-            name="Trinka_ticket_context_tool",
-            func=tool_func,
-            description="Fetch Freshdesk ticket context as structured JSON. Input should be a ticket ID."
+        return StructuredTool.from_function(
+            func=fetch_context,
+            name="trinka_ticket_context",
+            description="Fetch Freshdesk ticket context as structured JSON. Use this tool ONCE per ticket ID to get complete information about a specific ticket and related tickets from the same requester. Do not call this tool repeatedly for the same ticket ID. Provide the ticket ID as input.",
+            args_schema=TicketContextInput,
         )
