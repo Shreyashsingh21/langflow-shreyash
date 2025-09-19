@@ -38,12 +38,11 @@ class LocalChatModel(BaseChatModel):
     timeout: int = 60  # Allow slower local servers
     _session: Optional[requests.Session] = None
     def _sanitize_final_content(self, content: str) -> str:
-        """Remove leaked tool-call JSON and collapse duplicate consecutive lines."""
+        """Remove leaked tool-call JSON and collapse duplicate consecutive lines, preserving code fences."""
         try:
             import re
             text = content or ""
-            text = re.sub(r"```json[\s\S]*?```", "", text, flags=re.MULTILINE)
-            text = re.sub(r"```[\s\S]*?```", "", text, flags=re.MULTILINE)
+            # Preserve fenced code blocks; only strip inline tool-call JSON blobs
             text = re.sub(r"\{\s*\"actions\"\s*:\s*\[[\s\S]*?\]\s*\}", "", text)
             text = re.sub(r"\{\s*\"action\"\s*:\s*\"[^\"]+\"[\s\S]*?\}", "", text)
             lines = text.splitlines()
@@ -828,6 +827,7 @@ EXAMPLE WORKFLOW:
                     # Remove any "tool." prefix that might be incorrectly added
                     if name.startswith('tool.'):
                         name = name[5:]  # Remove "tool." prefix
+                    
                     tool_calls.append({
                         'id': f'call_{len(tool_calls)}',
                         'type': 'function',
