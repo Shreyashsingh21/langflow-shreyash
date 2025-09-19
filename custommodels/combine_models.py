@@ -99,8 +99,8 @@ class LocalLanguageModelComponent(LCModelComponent):
         timeout = self.timeout
 
         if provider == "GPT-OSS":
-            # Instantiate the LocalChatModel from installed SelfDeployedModels to avoid relative import resolution issues
-            from langflow.components.SelfDeployedModels.gptoss import LocalChatModel as GPTOSSLocalChatModel
+            # Instantiate the LocalChatModel from installed OwnDeployedModels to avoid relative import resolution issues
+            from langflow.components.OwnDeployedModels.gptoss import LocalChatModel as GPTOSSLocalChatModel
             return GPTOSSLocalChatModel(
                 json_mode=json_mode,
                 temperature=temperature,
@@ -109,8 +109,8 @@ class LocalLanguageModelComponent(LCModelComponent):
             )
 
         if provider == "Llama Local":
-            # Instantiate the LocalChatModel from installed SelfDeployedModels to avoid relative import resolution issues
-            from langflow.components.SelfDeployedModels.llama import LocalChatModel as LlamaLocalChatModel
+            # Instantiate the LocalChatModel from installed OwnDeployedModels to avoid relative import resolution issues
+            from langflow.components.OwnDeployedModels.llama import LocalChatModel as LlamaLocalChatModel
             return LlamaLocalChatModel(
                 json_mode=json_mode,
                 temperature=temperature,

@@ -166,7 +166,7 @@ class AgentComponent(ToolCallingAgentComponent):
             # Handle custom local models without relying on MODEL_PROVIDERS_DICT
             if self.agent_llm in ("GPT-OSS (Crimson)", "Llama Local (Crimson)"):
                 # Lazy import to avoid circular deps during build
-                from langflow.components.SelfDeployedModels.combine_models import (
+                from langflow.components.OwnDeployedModels.combine_models import (
                     LocalLanguageModelComponent as CrimsonLocalComponent,
                 )
                 # Map provider display name to component provider value

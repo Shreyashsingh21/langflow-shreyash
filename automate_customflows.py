@@ -87,17 +87,19 @@ class ComponentValidator:
 
 
 class CustomflowsAutomation:
-    """Main automation class for integrating customflows into Langflow."""
+    """Main automation class for integrating customflows and customtools into Langflow."""
     
     def __init__(self, workspace_path: Optional[str] = None):
         # Resolve workspace path; default to the directory containing this script
         base_path = Path(workspace_path) if workspace_path else Path(__file__).resolve().parent
         self.workspace_path = base_path
-        self.customflows_dir = self.workspace_path / "customflows"
+        self.custommodels_dir = self.workspace_path / "custommodels"
+        self.customtools_dir = self.workspace_path / "customtools"
         # Resolve Langflow components path dynamically (active venv / environment)
         self.langflow_components_path = self._resolve_langflow_components_path()
-        # Category folder name shown in Langflow sidebar (no spaces). Override with CUSTOM_CATEGORY_NAME env.
-        self.custom_category_name = os.environ.get("CUSTOM_CATEGORY_NAME", "SelfDeployedModels")
+        # Category folder names shown in Langflow sidebar (no spaces). Override with env vars.
+        self.models_category_name = os.environ.get("MODELS_CATEGORY_NAME", "OwnDeployedModels")
+        self.tools_category_name = os.environ.get("TOOLS_CATEGORY_NAME", "OwnDeployedTools")
         self.validator = ComponentValidator()
 
     def _resolve_langflow_components_path(self) -> Path:
@@ -166,19 +168,35 @@ class CustomflowsAutomation:
         # Ultimate fallback to workspace .venv structure (may not exist)
         return self.workspace_path / ".venv/lib/python3/site-packages/langflow/components"
         
-    def scan_customflows_directory(self) -> List[Path]:
-        """Scan the customflows directory for Python component files."""
-        if not self.customflows_dir.exists():
-            print(f"customflows directory not found: {self.customflows_dir}")
+    def scan_directory(self, directory: Path, directory_name: str) -> List[Path]:
+        """Scan a directory for Python component files."""
+        if not directory.exists():
+            print(f"{directory_name} directory not found: {directory}")
             return []
         
         python_files = []
-        for file_path in self.customflows_dir.rglob("*.py"):
+        for file_path in directory.rglob("*.py"):
             if file_path.name != "__init__.py":
                 python_files.append(file_path)
         
-        print(f"Found {len(python_files)} Python files in customflows")
+        print(f"Found {len(python_files)} Python files in {directory_name}")
         return python_files
+    
+    def scan_all_directories(self) -> Dict[str, List[Path]]:
+        """Scan both custommodels and customtools directories."""
+        all_files = {}
+        
+        # Scan custommodels directory
+        models_files = self.scan_directory(self.custommodels_dir, "custommodels")
+        if models_files:
+            all_files["models"] = models_files
+        
+        # Scan customtools directory
+        tools_files = self.scan_directory(self.customtools_dir, "customtools")
+        if tools_files:
+            all_files["tools"] = tools_files
+        
+        return all_files
     
     def validate_components(self, python_files: List[Path]) -> List[Dict[str, Any]]:
         """Validate that Python files are proper Langflow components."""
@@ -208,21 +226,21 @@ class CustomflowsAutomation:
         
         return valid_components
     
-    def create_custom_category_directory(self) -> Path:
-        """Create the custom_flows category directory structure."""
-        custom_flows_dir = self.langflow_components_path / self.custom_category_name
-        custom_flows_dir.mkdir(exist_ok=True)
+    def create_category_directory(self, category_name: str, description: str) -> Path:
+        """Create a category directory structure."""
+        category_dir = self.langflow_components_path / category_name
+        category_dir.mkdir(exist_ok=True)
         
         # Create __init__.py for the category
-        init_file = custom_flows_dir / "__init__.py"
+        init_file = category_dir / "__init__.py"
         if not init_file.exists():
-            init_content = f'"""Custom flows components from customflows/ directory."""\n'
+            init_content = f'"""{description}"""\n'
             init_file.write_text(init_content)
-            print(f"Created {self.custom_category_name} category directory")
+            print(f"Created {category_name} category directory")
         else:
-            print(f"{self.custom_category_name} category directory already exists")
+            print(f"{category_name} category directory already exists")
         
-        return custom_flows_dir
+        return category_dir
     
     def copy_components_to_langflow(self, valid_components: List[Dict[str, Any]], target_dir: Path) -> List[str]:
         """Copy valid components to the Langflow components directory."""
@@ -247,7 +265,7 @@ class CustomflowsAutomation:
         
         return copied_files
     
-    def update_category_init_file(self, target_dir: Path, copied_files: List[str]):
+    def update_category_init_file(self, target_dir: Path, copied_files: List[str], category_name: str):
         """Update the category's __init__.py file to import the copied components."""
         init_file = target_dir / "__init__.py"
         
@@ -255,7 +273,7 @@ class CustomflowsAutomation:
         if init_file.exists():
             current_content = init_file.read_text()
         else:
-            current_content = f'"""Custom flows components from customflows/ directory."""\n\n'
+            current_content = f'"""Custom components from {category_name.lower()}/ directory."""\n\n'
         
         # Add imports for each copied component
         imports_to_add = []
@@ -271,12 +289,12 @@ class CustomflowsAutomation:
                 current_content += '\n'
             current_content += ''.join(imports_to_add)
             init_file.write_text(current_content)
-            print(f"Updated {self.custom_category_name}/__init__.py with {len(imports_to_add)} new imports")
+            print(f"Updated {category_name}/__init__.py with {len(imports_to_add)} new imports")
         else:
-            print(f"{self.custom_category_name}/__init__.py already up to date")
+            print(f"{category_name}/__init__.py already up to date")
     
-    def update_main_components_init_file(self):
-        """Update the main components __init__.py to include the custom category."""
+    def update_main_components_init_file(self, categories: List[str]):
+        """Update the main components __init__.py to include the custom categories."""
         components_init_path = self.langflow_components_path / "__init__.py"
         
         # Read the current content
@@ -285,15 +303,19 @@ class CustomflowsAutomation:
         else:
             current_content = ""
         
-        # Add import for our custom category if not already present
-        new_import = f"from . import {self.custom_category_name}\n"
+        # Add imports for our custom categories if not already present
+        imports_to_add = []
+        for category in categories:
+            new_import = f"from . import {category}\n"
+            if new_import not in current_content:
+                imports_to_add.append(new_import)
         
-        if new_import not in current_content:
+        if imports_to_add:
             if current_content and not current_content.endswith('\n'):
                 current_content += '\n'
-            current_content += new_import
+            current_content += ''.join(imports_to_add)
             components_init_path.write_text(current_content)
-            print("Updated main components __init__.py")
+            print(f"Updated main components __init__.py with {len(imports_to_add)} new imports")
         else:
             print("Main components __init__.py already updated")
     
@@ -308,10 +330,11 @@ class CustomflowsAutomation:
                 print(f"Could not create backup: {str(e)}")
     
     def run_automation(self, create_backup: bool = True):
-        """Run the complete automation process."""
-        print("Starting customflows automation")
-        print(f"Source: {self.customflows_dir}")
-        print(f"Target: {self.langflow_components_path / self.custom_category_name}")
+        """Run the complete automation process for both models and tools."""
+        print("Starting customflows and customtools automation")
+        print(f"Models Source: {self.custommodels_dir}")
+        print(f"Tools Source: {self.customtools_dir}")
+        print(f"Target: {self.langflow_components_path}")
         print("-" * 60)
 
         # Sanity check for target parent directory existence
@@ -328,38 +351,67 @@ class CustomflowsAutomation:
         if create_backup:
             self.create_backup()
         
-        # Step 1: Scan for Python files
-        python_files = self.scan_customflows_directory()
-        if not python_files:
-            print("No Python files found in customflows directory")
+        # Step 1: Scan for Python files in both directories
+        all_files = self.scan_all_directories()
+        if not all_files:
+            print("No Python files found in custommodels or customtools directories")
             return
         
-        # Step 2: Validate components
-        valid_components = self.validate_components(python_files)
-        if not valid_components:
-            print("No valid Langflow components found")
-            return
+        total_components = 0
+        created_categories = []
         
-        print(f"\nFound {len(valid_components)} valid component(s)")
+        # Process each directory type
+        for directory_type, python_files in all_files.items():
+            if not python_files:
+                continue
+                
+            print(f"\n--- Processing {directory_type.upper()} ---")
+            
+            # Step 2: Validate components
+            valid_components = self.validate_components(python_files)
+            if not valid_components:
+                print(f"No valid Langflow components found in {directory_type}")
+                continue
+            
+            print(f"Found {len(valid_components)} valid {directory_type} component(s)")
+            
+            # Step 3: Create category directory
+            if directory_type == "models":
+                category_name = self.models_category_name
+                description = "Custom models components from custommodels/ directory."
+            else:  # tools
+                category_name = self.tools_category_name
+                description = "Custom tools components from customtools/ directory."
+            
+            target_dir = self.create_category_directory(category_name, description)
+            created_categories.append(category_name)
+            
+            # Step 4: Copy components
+            copied_files = self.copy_components_to_langflow(valid_components, target_dir)
+            
+            if copied_files:
+                # Step 5: Update category __init__.py file
+                self.update_category_init_file(target_dir, copied_files, category_name)
+                total_components += len(copied_files)
+                
+                print(f"Integrated {len(copied_files)} {directory_type} component(s):")
+                for file_name in copied_files:
+                    print(f"   - {file_name}")
+            else:
+                print(f"No {directory_type} components were successfully copied")
         
-        # Step 3: Create custom category directory
-        target_dir = self.create_custom_category_directory()
-        
-        # Step 4: Copy components
-        copied_files = self.copy_components_to_langflow(valid_components, target_dir)
-        
-        if copied_files:
-            # Step 5: Update __init__.py files
-            self.update_category_init_file(target_dir, copied_files)
-            self.update_main_components_init_file()
+        # Step 6: Update main components __init__.py
+        if created_categories:
+            self.update_main_components_init_file(created_categories)
             
             print(f"\nAutomation completed successfully")
-            print(f"Integrated {len(copied_files)} component(s):")
-            for file_name in copied_files:
-                print(f"   - {file_name}")
-            print(f"\nRestart Langflow to see your custom components in the '{self.custom_category_name}' section")
+            print(f"Total integrated components: {total_components}")
+            print(f"Created categories: {', '.join(created_categories)}")
+            print(f"\nRestart Langflow to see your custom components in the following sections:")
+            for category in created_categories:
+                print(f"   - {category}")
         else:
-            print("No components were successfully copied")
+            print("No components were successfully integrated")
 
 
 def main():

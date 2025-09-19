@@ -3,6 +3,8 @@ import os
 import json
 from typing import Any, List, Dict, Optional, Union, Iterator, AsyncIterator
 from typing_extensions import override
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, AIMessageChunk
@@ -20,8 +22,8 @@ try:
 except ImportError:
     pass  # Ignore if not available
 
-API_BASE_URL = "http://164.52.210.75:11434/v1/chat/completions"
-MODEL_NAME_HARDCODED = "gpt-oss:20b"
+API_BASE_URL = os.environ.get("GPTOSS_API_BASE", "https://gptoss-api.trinka.ai/gpt-oss-20B_chat")
+MODEL_NAME_HARDCODED = os.environ.get("GPTOSS_MODEL", "gpt-oss:20b")
 
 
 # Custom LangChain Chat Model Wrapper for Local LLM
@@ -31,9 +33,29 @@ class LocalChatModel(BaseChatModel):
     api_base: str = API_BASE_URL
     model_name: str = MODEL_NAME_HARDCODED
     json_mode: bool = False
-    temperature: float = 0.7  
-    max_tokens: int = 512  
-    timeout: int = 60
+    temperature: float = 0.3  # Lower temperature for faster, more deterministic responses
+    max_tokens: int = 256  # Reduced for faster responses
+    timeout: int = 60  # Allow slower local servers
+    _session: Optional[requests.Session] = None
+    def _sanitize_final_content(self, content: str) -> str:
+        """Remove leaked tool-call JSON and collapse duplicate consecutive lines, preserving code fences."""
+        try:
+            import re
+            text = content or ""
+            # Preserve fenced code blocks; only strip inline tool-call JSON blobs
+            text = re.sub(r"\{\s*\"actions\"\s*:\s*\[[\s\S]*?\]\s*\}", "", text)
+            text = re.sub(r"\{\s*\"action\"\s*:\s*\"[^\"]+\"[\s\S]*?\}", "", text)
+            lines = text.splitlines()
+            deduped = []
+            prev = None
+            for ln in lines:
+                if ln != prev:
+                    deduped.append(ln)
+                prev = ln
+            cleaned = "\n".join(deduped).strip()
+            return cleaned or (content.strip() if content else "")
+        except Exception:
+            return content
     
     def _debug(self, message: str, data: Optional[Any] = None) -> None:
         try:
@@ -64,63 +86,63 @@ class LocalChatModel(BaseChatModel):
         
         # Convert LangChain messages to API format
         api_messages = self._convert_messages_to_api_format(messages)
+        # Build minimal variants of messages for stricter providers
+        minimal_messages: List[Dict[str, str]] = []
+        system_texts: List[str] = []
+        try:
+            for m in api_messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if role == "system":
+                    system_texts.append(content)
+                    continue
+                if role not in ("user", "assistant"):
+                    role = "user"
+                minimal_messages.append({"role": role, "content": content})
+        except Exception:
+            minimal_messages = api_messages
+
+        # Optional: strict mode to avoid injecting extra system/tool instructions
+        strict_messages = os.environ.get("GPTOSS_STRICT_MESSAGES", "0") == "1"
         
-        # Add a general system instruction to handle tool results properly
+        # Add a concise system instruction that still allows comprehensive, multi-tool answers
         general_instruction = {
             "role": "system",
-            "content": """You are a helpful AI assistant. CRITICAL TOOL USAGE RULES:
-
-1. WHEN TO USE TOOLS: Only use tools when you need specific information you don't already have
-2. WHEN TO STOP: After receiving ANY tool response (successful or empty), ALWAYS provide a final answer to the user
-3. DO NOT ITERATE: Never use multiple tools in sequence or retry the same tool multiple times
-4. RESPONSE FORMAT: After any tool usage, your next response must be conversational text answering the user's question
-
-TOOL RESPONSE HANDLING:
-- If tool returns useful data → Use it to answer the user's question directly
-- If tool returns empty/no results → Acknowledge this and provide alternative suggestions
-- NEVER ask for more tool usage after receiving a tool response
-- ALWAYS end with a helpful final answer to the user"""
+            "content": """You are a helpful AI assistant. Use tools when needed to answer accurately and comprehensively. You may call multiple tools and iterate when useful. Synthesize information from all tools into a clear final answer. Do not mention tool names in final answers."""
         }
         
-        # Insert general instruction at the beginning
-        api_messages.insert(0, general_instruction)
+        # Insert general instruction at the beginning unless strict
+        if not strict_messages:
+            api_messages.insert(0, general_instruction)
         
         # Add tool information if tools are bound
-        if hasattr(self, '_tools') and self._tools:
+        if (not strict_messages) and hasattr(self, '_tools') and self._tools:
             tool_descriptions = self._format_tools_for_prompt()
             if tool_descriptions:
                 # Add tool information to the system message or as a separate message
                 tool_message = {
                     "role": "system", 
-                    "content": f"""You have access to the following tools:
+                    "content": f"""Tools available:
 {tool_descriptions}
 
 TOOL USE INSTRUCTIONS:
-1. When you need to use a tool, respond with ONLY the JSON: {{"action": "tool_name", "action_input": {{"param_name": "value"}}}}
-2. Use the EXACT parameter names listed in the "Parameters:" section for each tool above
-3. For required parameters, you MUST provide them. Optional parameters can be omitted.
-4. When you don't need tools, respond with helpful conversational text
-5. The system will handle tool execution and provide you with results
-
-CRITICAL STOPPING RULE:
-- AFTER ANY TOOL EXECUTION: Your next response MUST be conversational text answering the user's question
-- DO NOT use another tool after receiving a tool response
-- DO NOT retry failed tools - provide alternatives instead
-- ALWAYS provide a final helpful answer to the user after tool usage
+1. Single call: {{"action": "tool_name", "action_input": {{"param": "value"}}}}
+2. Batch multiple calls: {{"actions": [{{"action": "toolA", "action_input": {{...}}}}, {{"action": "toolB", "action_input": {{...}}}}]}}
+3. Use the EXACT parameter names listed in each tool's Parameters.
+4. Required parameters MUST be provided; optional can be omitted.
+5. Analyze results and call additional tools if needed for complete information.
+6. Final answer must be clean prose (no JSON), synthesizing all tool results.
 
 PARAMETER MATCHING RULES:
 - If you see "input_value" in parameters → use "input_value"
-- If you see "search_query" in parameters → use "search_query"  
+- If you see "search_query" in parameters → use "search_query"
 - If you see "url" in parameters → use "url"
 - Always match the exact parameter name from the tool description
 
 EXAMPLE WORKFLOW:
-1. User asks question → Use tool if needed: {{"action": "ToolName", "action_input": {{"param": "value"}}}}
-2. Tool returns result → Provide conversational answer: "Based on the search results, I found..."
-3. STOP - No more tool usage
-
-TOOL RESPONSE FORMAT:
-{{"action": "ToolName", "action_input": {{"exact_param_from_description": "your_value"}}}}"""
+1. User asks question → If multiple independent lookups: {{"actions": [ ... ]}}
+2. Tools return results → Analyze results and, if needed, call more tools
+3. When sufficient information is gathered → Provide a comprehensive final answer."""
                 }
                 # Insert tool message at the beginning (after any existing system message)
                 if api_messages and api_messages[0]["role"] == "system":
@@ -128,26 +150,160 @@ TOOL RESPONSE FORMAT:
                 else:
                     api_messages.insert(0, tool_message)
         
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer token-abc123"}
-        payload = {
+        # Build headers with API key support
+        api_key = os.environ.get("GPTOSS_API_KEY") or os.environ.get("TRINKA_API_KEY")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if api_key:
+            # Try both common auth header styles
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["x-api-key"] = api_key
+
+        # Prepare multiple payload variants to handle provider schema quirks
+        payload_variants: List[Dict[str, Any]] = []
+
+        # Variant A: OpenAI-like (default)
+        payload_variants.append({
             "model": self.model_name,
             "messages": api_messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "stop": stop or [],
-        }
+            "stream": False,
+        })
+
+        # Variant B: same as A but omit model (some providers fix model server-side)
+        payload_variants.append({
+            "messages": api_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stop": stop or [],
+            "stream": False,
+        })
+
+        # Variant C: alternative keys used by some backends
+        payload_variants.append({
+            "messages": api_messages,
+            "temperature": self.temperature,
+            "max_new_tokens": self.max_tokens,
+            "stream": False,
+        })
+
+        # Variant D: generic "input" wrapper
+        payload_variants.append({
+            "input": api_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        })
+
+        # Variant E: minimal messages only (drop system)
+        payload_variants.append({
+            "messages": minimal_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        })
+
+        # Variant F: minimal messages with model
+        payload_variants.append({
+            "model": self.model_name,
+            "messages": minimal_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+        })
+
+        # Variant G: prompt string (concatenate)
+        try:
+            prompt_lines: List[str] = []
+            if system_texts:
+                prompt_lines.append("\n\n".join(system_texts))
+            for m in minimal_messages:
+                prompt_lines.append(f"{m.get('role','user')}: {m.get('content','')}")
+            prompt_text = "\n".join(prompt_lines).strip()
+        except Exception:
+            prompt_text = ""
+        if prompt_text:
+            payload_variants.append({
+                "prompt": prompt_text,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            })
+
+        # Variant H: inputs schema used by some inference servers
+        if prompt_text:
+            payload_variants.append({
+                "inputs": {
+                    "past_user_inputs": [],
+                    "generated_responses": [],
+                    "text": prompt_text,
+                },
+                "parameters": {
+                    "temperature": self.temperature,
+                    "max_new_tokens": self.max_tokens,
+                }
+            })
         
         try:
-            # Log outgoing request (without auth header)
-            self._debug("Requesting completion", {"url": self.api_base, "payload": payload})
-            response = requests.post(self.api_base, headers=headers, json=payload, timeout=self.timeout)
+            # Use session with connection pooling for better performance
+            if self._session is None:
+                self._session = requests.Session()
+                # Configure retry strategy for better reliability
+                retry_strategy = Retry(
+                    total=2,  # Only 2 retries for speed
+                    backoff_factor=0.1,  # Very short backoff
+                    status_forcelist=[429, 500, 502, 503, 504],
+                )
+                adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=1, pool_maxsize=1)
+                self._session.mount("http://", adapter)
+                self._session.mount("https://", adapter)
+            
+            # Try each payload variant until one succeeds (non-4xx or specifically not 422)
+            request_timeout = (10, self.timeout)
+            last_response = None
+            last_error_body: Optional[str] = None
+            for idx, payload in enumerate(payload_variants):
+                # Log outgoing request (without auth header)
+                self._debug("Requesting completion", {"url": self.api_base, "variant": idx, "payload": payload})
+                try:
+                    response = self._session.post(self.api_base, headers=headers, json=payload, timeout=request_timeout)
+                except requests.exceptions.ReadTimeout:
+                    # Retry once with reduced tokens and extended timeout
+                    reduced_payload = dict(payload)
+                    if "max_tokens" in reduced_payload:
+                        reduced_payload["max_tokens"] = max(64, int(self.max_tokens / 2))
+                    if "max_new_tokens" in reduced_payload:
+                        reduced_payload["max_new_tokens"] = max(64, int(self.max_tokens / 2))
+                    self._debug("Read timeout. Retrying with reduced tokens and longer timeout", reduced_payload.get("max_tokens", reduced_payload.get("max_new_tokens", None)))
+                    response = self._session.post(self.api_base, headers=headers, json=reduced_payload, timeout=(10, self.timeout * 2))
+
+                last_response = response
+                self._debug("Response status", response.status_code)
+                try:
+                    self._debug("Raw response text", response.text[:4000])
+                    if response.status_code >= 400:
+                        last_error_body = response.text
+                except Exception:
+                    pass
+
+                # If not 422, or success, break and handle
+                if response.status_code != 422:
+                    break
+
+            # If we tried multiple and still have a response, raise for status here
+            response = last_response if last_response is not None else response
             self._debug("Response status", response.status_code)
             # Try to log JSON or raw text
             try:
                 self._debug("Raw response text", response.text[:4000])
             except Exception:
                 pass
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except Exception as e:
+                # Surface the server error body to the user for faster debugging
+                details = (last_error_body or getattr(response, 'text', '') or "").strip()
+                raise type(e)(f"{str(e)} | body: {details[:800]}")
             data = {}
             try:
                 data = response.json()
@@ -158,12 +314,28 @@ TOOL RESPONSE FORMAT:
             # Extract content and potential tool calls defensively
             content = ""
             message_dict = {}
+            first_choice = {}
             try:
-                message_dict = (
-                    data.get("choices", [{}])[0]
-                        .get("message", {})
+                choices = data.get("choices") or []
+                if isinstance(choices, list) and choices:
+                    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+                # Primary: OpenAI-like schema
+                message_dict = (first_choice.get("message") or {})
+                # Some providers put the last message in an array
+                if not message_dict and isinstance(first_choice.get("messages"), list) and first_choice["messages"]:
+                    message_dict = first_choice["messages"][-1] or {}
+                # Content extraction attempts in order
+                content = (
+                    (message_dict.get("content") if isinstance(message_dict, dict) else "")
+                    or first_choice.get("text", "")
+                    or data.get("content", "")
+                    or data.get("text", "")
+                    or data.get("output_text", "")
+                    or data.get("response", "")
                 )
-                content = message_dict.get("content", "")
+                # Some streaming-like responses may have delta blocks
+                if not content and isinstance(first_choice.get("delta"), dict):
+                    content = first_choice["delta"].get("content", "")
             except Exception:
                 content = ""
             if not content:
@@ -189,7 +361,13 @@ TOOL RESPONSE FORMAT:
             if hasattr(self, '_tools') and self._tools:
                 structured_tool_calls = []
                 try:
-                    api_tool_calls = message_dict.get("tool_calls") or []
+                    # Tool calls may appear in multiple locations depending on provider
+                    api_tool_calls = (
+                        (message_dict.get("tool_calls") if isinstance(message_dict, dict) else None)
+                        or first_choice.get("tool_calls")
+                        or data.get("tool_calls")
+                        or []
+                    )
                     if isinstance(api_tool_calls, list) and api_tool_calls:
                         for call in api_tool_calls:
                             if isinstance(call, dict) and call.get("type") == "function" and "function" in call:
@@ -227,10 +405,18 @@ TOOL RESPONSE FORMAT:
                         message = AIMessage(content="", tool_calls=langchain_tool_calls)
                     else:
                         self._debug("No tool calls detected")
+                        # Sanitize final prose to avoid leaking JSON tool calls and duplicates
+                        if message.content:
+                            message = AIMessage(content=self._sanitize_final_content(message.content))
             
             # If still empty message and no tool calls, provide a meaningful placeholder
             if (not getattr(message, 'tool_calls', None)) and (not message.content):
-                message = AIMessage(content="(empty response from model)")
+                # Last-ditch: attempt to stringify any 'reasoning' or provider-specific fields
+                fallback_text = (
+                    data.get("reasoning", "")
+                    or (first_choice.get("reasoning", "") if isinstance(first_choice, dict) else "")
+                )
+                message = AIMessage(content=fallback_text or "(no content returned by model)")
                 self._debug("Empty content after parsing; using placeholder")
             
             # Additional debug info for troubleshooting
@@ -368,30 +554,63 @@ TOOL RESPONSE FORMAT:
         api_messages = []
         has_tool_response = False
         
+        def normalize_content(raw: Any) -> str:
+            try:
+                if raw is None:
+                    return ""
+                if isinstance(raw, list):
+                    parts: List[str] = []
+                    for part in raw:
+                        if isinstance(part, dict):
+                            if isinstance(part.get("text"), str):
+                                parts.append(part["text"])
+                            elif isinstance(part.get("content"), str):
+                                parts.append(part["content"])
+                            else:
+                                parts.append(str(part))
+                        else:
+                            parts.append(str(part))
+                    return "\n".join([p for p in parts if p]).strip()
+                if isinstance(raw, dict):
+                    if isinstance(raw.get("text"), str):
+                        return raw["text"]
+                    if isinstance(raw.get("content"), str):
+                        return raw["content"]
+                    try:
+                        return json.dumps(raw, ensure_ascii=False)
+                    except Exception:
+                        return str(raw)
+                return str(raw)
+            except Exception:
+                try:
+                    return str(raw)
+                except Exception:
+                    return ""
+
         for message in messages:
             if isinstance(message, SystemMessage):
-                api_messages.append({"role": "system", "content": message.content})
+                api_messages.append({"role": "system", "content": normalize_content(message.content)})
             elif isinstance(message, HumanMessage):
-                api_messages.append({"role": "user", "content": message.content})
+                api_messages.append({"role": "user", "content": normalize_content(message.content)})
             elif isinstance(message, AIMessage):
-                api_messages.append({"role": "assistant", "content": message.content})
+                api_messages.append({"role": "assistant", "content": normalize_content(message.content)})
             else:
                 # Check if this is a tool result message
-                content = str(message.content)
+                content = normalize_content(message.content)
                 if any(indicator in content.lower() for indicator in ['tool result:', 'search result:', 'function result:', 'output:']):
                     has_tool_response = True
-                    # Add clear instruction that this is a tool response
-                    enhanced_content = f"TOOL RESPONSE RECEIVED: {content}\n\nIMPORTANT: You have received a tool response. Your next message MUST be a final conversational answer to the user's question. Do NOT use any more tools."
+                    # Encourage comprehensive synthesis and allow additional tool calls if needed
+                    enhanced_content = f"TOOL RESPONSE RECEIVED: {content}\n\nYou have received a tool response. You may:\n1. Use this information to answer comprehensively\n2. Call additional tools if you need more information\n3. Provide a final answer once you have sufficient information"
                     api_messages.append({"role": "user", "content": enhanced_content})
                 else:
                     # Default to user message for unknown types
                     api_messages.append({"role": "user", "content": content})
         
-        # If we detected a tool response, add a strong reminder
+        # If we detected a tool response, add a controller note emphasizing comprehensive synthesis
         if has_tool_response and api_messages:
             api_messages.append({
                 "role": "system", 
-                "content": "REMINDER: A tool response was provided above. You MUST now provide a final conversational answer to the user. DO NOT use any more tools."
+                "content": "CONTROLLER: Tool responses are provided above. Analyze all results and, if needed, call additional tools (output ONLY JSON for actions). Provide a comprehensive final answer in clean prose without any tool-call JSON."
             })
         
         return api_messages
@@ -410,28 +629,28 @@ TOOL RESPONSE FORMAT:
     def _llm_type(self) -> str:
         return "local-chat-llm"
     
+    def __del__(self):
+        """Clean up session when model is destroyed."""
+        if hasattr(self, '_session') and self._session is not None:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+    
     def bind_tools(
         self,
         tools: List[Union[Dict[str, Any], type, BaseTool]],
         **kwargs: Any,
     ) -> "LocalChatModel":
-        """Bind tools to the model for tool calling."""
-        # Tools being bound to model
-        pass
-        
-        # Create a new instance with the same parameters but with tools bound
-        bound_model = LocalChatModel(
-            api_base=self.api_base,
-            model_name=self.model_name,
-            json_mode=self.json_mode,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            timeout=self.timeout,
-        )
-        # Store the tools on the model instance
-        bound_model._bound_tools = tools
-        # Model bound with tools successfully
-        return bound_model
+        """Bind tools to the model for tool calling.
+        Mutates current instance to ensure agent uses the same model with tools.
+        """
+        try:
+            self._tools = tools
+        except Exception:
+            # Fallback attribute set
+            setattr(self, "_tools", tools)
+        return self
     
     @property
     def _bound_tools(self) -> List[Union[Dict[str, Any], type, BaseTool]]:
@@ -593,82 +812,74 @@ TOOL RESPONSE FORMAT:
             return ' | Parameters: check tool documentation for required parameters'
     
     def _parse_tool_calls(self, content: str) -> List[Dict[str, Any]]:
-        """Parse tool calls from the model response."""
-        tool_calls = []
+        """Parse one or multiple tool calls from model response.
+        Supports single action {action, action_input} and batched {actions: [{action,...}, ...]}.
+        """
+        tool_calls: List[Dict[str, Any]] = []
         try:
             import json
             import re
-            
-            # First, try to parse the entire content as JSON (most common case)
-            content_stripped = content.strip()
-            try:
-                parsed_content = json.loads(content_stripped)
-                if isinstance(parsed_content, dict) and 'action' in parsed_content:
+
+            def append_action(action_obj):
+                name = action_obj.get('action') or action_obj.get('name')
+                args = action_obj.get('action_input') or action_obj.get('arguments') or {}
+                if name:
+                    # Remove any "tool." prefix that might be incorrectly added
+                    if name.startswith('tool.'):
+                        name = name[5:]  # Remove "tool." prefix
+                    
                     tool_calls.append({
                         'id': f'call_{len(tool_calls)}',
                         'type': 'function',
                         'function': {
-                            'name': parsed_content['action'],
-                            'arguments': json.dumps(parsed_content.get('action_input', {}))
+                            'name': name,
+                            'arguments': json.dumps(args if isinstance(args, dict) else {})
                         }
                     })
-                    return tool_calls
-            except json.JSONDecodeError:
+
+            # Try whole content as JSON
+            try:
+                parsed = json.loads(content.strip())
+                if isinstance(parsed, dict):
+                    if 'actions' in parsed and isinstance(parsed['actions'], list):
+                        for act in parsed['actions']:
+                            if isinstance(act, dict):
+                                append_action(act)
+                        if tool_calls:
+                            return tool_calls
+                    if 'action' in parsed:
+                        append_action(parsed)
+                        if tool_calls:
+                            return tool_calls
+            except Exception:
                 pass
-            
-            # Try to extract JSON from mixed text (fallback for when model includes explanation)
-            # Use greedy pattern to capture full JSON object
-            json_in_text_pattern = r'\{.*\}'
-            json_matches = re.findall(json_in_text_pattern, content, re.DOTALL)
-            for json_match in json_matches:
-                try:
-                    parsed = json.loads(json_match)
-                    if isinstance(parsed, dict) and 'action' in parsed:
-                        tool_calls.append({
-                            'id': f'call_{len(tool_calls)}',
-                            'type': 'function',
-                            'function': {
-                                'name': parsed['action'],
-                                'arguments': json.dumps(parsed.get('action_input', {}))
-                            }
-                        })
-                        return tool_calls
-                except json.JSONDecodeError:
-                    continue
-            
-            # Try to find JSON blocks in the response
+
+            # Search JSON objects within text (greedy and fenced)
             json_patterns = [
                 r'```json\s*(.*?)\s*```',
                 r'```\s*(.*?)\s*```',
-                r'\{[^{}]*"action"[^{}]*\}',  # More specific pattern for action objects
-                r'\{.*?\}'
+                r'\{[\s\S]*?\}'
             ]
-            
             for pattern in json_patterns:
                 matches = re.findall(pattern, content, re.DOTALL | re.MULTILINE)
                 for match in matches:
-                    json_str = match.strip() if isinstance(match, str) else match
-                    if json_str and json_str.startswith('{') and json_str.endswith('}'):
-                        try:
-                            parsed = json.loads(json_str)
-                            if isinstance(parsed, dict) and 'action' in parsed:
-                                tool_calls.append({
-                                    'id': f'call_{len(tool_calls)}',
-                                    'type': 'function',
-                                    'function': {
-                                        'name': parsed['action'],
-                                        'arguments': json.dumps(parsed.get('action_input', {}))
-                                    }
-                                })
-                        except json.JSONDecodeError:
-                            continue
-                if tool_calls:  # If we found tool calls, return them
-                    break
-                
-        except Exception as e:
-            pass  # Silently fail tool call parsing
-        
-        return tool_calls
+                    json_str = match.strip() if isinstance(match, str) else str(match)
+                    if not (json_str.startswith('{') and json_str.endswith('}')):
+                        continue
+                    try:
+                        parsed = json.loads(json_str)
+                        if isinstance(parsed, dict):
+                            if 'actions' in parsed and isinstance(parsed['actions'], list):
+                                for act in parsed['actions']:
+                                    if isinstance(act, dict):
+                                        append_action(act)
+                            elif 'action' in parsed:
+                                append_action(parsed)
+                    except Exception:
+                        continue
+            return tool_calls
+        except Exception:
+            return tool_calls
 
 
 # Langflow Component
@@ -682,22 +893,22 @@ class GPTOSSModelComponent(LCModelComponent):
         FloatInput(
             name="temperature",
             display_name="Temperature",
-            info="Controls randomness in the model's output. Higher values make output more random.",
-            value=0.7,
+            info="Controls randomness in the model's output. Lower values = faster, more deterministic responses.",
+            value=0.3,
             advanced=False,
         ),
         IntInput(
             name="max_tokens",
             display_name="Max Tokens",
-            info="Maximum number of tokens to generate in the response.",
-            value=512,
+            info="Maximum number of tokens to generate in the response. Lower values = faster responses.",
+            value=256,
             advanced=False,
         ),
         IntInput(
             name="timeout",
             display_name="Request Timeout",
-            info="Timeout for API requests in seconds.",
-            value=60,
+            info="Timeout for API requests in seconds. Lower values = faster failures.",
+            value=15,
             advanced=True,
         ),
         BoolInput(

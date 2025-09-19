@@ -16,7 +16,8 @@ import requests
 class TrinkaSupportTicketContext(Component):
     display_name = "Trinka Ticket Context Tool"
     description = "Fetches Freshdesk ticket context and outputs structured JSON for agents to use."
-    icon = "📝"
+    icon = "Ticket"
+    category = "tools"
 
     inputs = [
         StrInput(name="ticket_id", display_name="Ticket ID", required=True),
@@ -127,16 +128,8 @@ class TrinkaSupportTicketContext(Component):
             return Message(text=f"Unhandled Exception: {str(e)}")
 
     def build_tool(self) -> Tool:
-        def tool_func(input_data) -> str:
+        def tool_func(ticket_id: str) -> str:
             try:
-                # Handle both string input and structured input
-                if isinstance(input_data, str):
-                    ticket_id = input_data
-                elif isinstance(input_data, dict):
-                    ticket_id = input_data.get('ticket_id', '')
-                else:
-                    ticket_id = str(input_data)
-                
                 if not ticket_id:
                     return "Error: No ticket ID provided"
                 
