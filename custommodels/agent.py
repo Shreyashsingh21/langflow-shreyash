@@ -12,7 +12,7 @@ from langflow.components.langchain_utilities.tool_calling import ToolCallingAgen
 from langflow.custom.custom_component.component import _get_component_toolkit
 from langflow.custom.utils import update_component_build_config
 from langflow.field_typing import Tool
-from langflow.io import BoolInput, DropdownInput, IntInput, MultilineInput, Output
+from langflow.io import BoolInput, DropdownInput, IntInput, MultilineInput, Output, FloatInput
 from langflow.logging import logger
 from langflow.schema.dotdict import dotdict
 from langflow.schema.message import Message
@@ -50,6 +50,34 @@ class AgentComponent(ToolCallingAgentComponent):
             real_time_refresh=True,
             input_types=[],
             options_metadata=[{"icon": "OpenAI"}, {"icon": "Ollama"}],
+        ),
+        FloatInput(
+            name="temperature",
+            display_name="Temperature",
+            value=0.7,
+            info="Controls randomness in responses",
+            advanced=False,
+        ),
+        IntInput(
+            name="max_tokens",
+            display_name="Max Tokens",
+            value=20000,
+            info="Maximum number of tokens to generate in the response",
+            advanced=False,
+        ),
+        IntInput(
+            name="timeout",
+            display_name="Request Timeout (s)",
+            value=60,
+            info="Timeout for API requests in seconds",
+            advanced=False,
+        ),
+        BoolInput(
+            name="json_mode",
+            display_name="JSON Mode",
+            value=False,
+            info="If True, output JSON format response",
+            advanced=False,
         ),
         MultilineInput(
             name="system_prompt",
@@ -177,13 +205,55 @@ class AgentComponent(ToolCallingAgentComponent):
                 provider_value = provider_map.get(self.agent_llm, "GPT-OSS")
 
                 # Build with safe defaults; these align with the component defaults
+                # Read values from UI (fallback to defaults) and validate
+                raw_temperature = getattr(self, "temperature", 0.7)
+                try:
+                    temperature_val = float(raw_temperature)
+                except Exception:
+                    temperature_val = 0.7
+                # Clamp temperature to [0,1]
+                temperature_val = max(0.0, min(1.0, temperature_val))
+
+                raw_max_tokens = getattr(self, "max_tokens", 20000)
+                try:
+                    max_tokens_val = int(raw_max_tokens)
+                except Exception:
+                    max_tokens_val = 20000
+                # Minimum sensible floor
+                max_tokens_val = max(16, max_tokens_val)
+
+                raw_timeout = getattr(self, "timeout", 60)
+                try:
+                    timeout_val = int(raw_timeout)
+                except Exception:
+                    timeout_val = 60
+                timeout_val = max(5, timeout_val)
+
+                json_mode_val = bool(getattr(self, "json_mode", False))
+
                 crimson_component = CrimsonLocalComponent().set(
                     provider=provider_value,
-                    temperature=0.7,
-                    max_tokens=512,
-                    timeout=60,
-                    json_mode=False,
+                    temperature=temperature_val,
+                    max_tokens=max_tokens_val,
+                    timeout=timeout_val,
+                    json_mode=json_mode_val,
                 )
+                # Indicate whether values came from the UI (user) or defaults
+                def src(name: str, default_marker: str = "default") -> str:
+                    try:
+                        return "user" if (name in getattr(self, "__dict__", {})) else default_marker
+                    except Exception:
+                        return default_marker
+                try:
+                    print(
+                        f"[SelfHostedAgent] Initializing {self.agent_llm} (provider={provider_value}) "
+                        f"with temperature={temperature_val} ({src('temperature')}), "
+                        f"max_tokens={max_tokens_val} ({src('max_tokens')}), "
+                        f"timeout={timeout_val} ({src('timeout')}), "
+                        f"json_mode={json_mode_val} ({src('json_mode')})"
+                    )
+                except Exception:
+                    pass
                 return crimson_component.build_model(), self.agent_llm
 
             msg = f"Invalid model provider: {self.agent_llm}"

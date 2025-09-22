@@ -40,3 +40,7 @@ node_modules/
 # Project-specific
 langflow_components_backup/
 
+langflow.db
+
+langflow.db-shm
+langflow.db-wal

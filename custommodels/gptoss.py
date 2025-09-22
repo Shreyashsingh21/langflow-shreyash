@@ -33,8 +33,8 @@ class LocalChatModel(BaseChatModel):
     api_base: str = API_BASE_URL
     model_name: str = MODEL_NAME_HARDCODED
     json_mode: bool = False
-    temperature: float = 0.3  # Lower temperature for faster, more deterministic responses
-    max_tokens: int = 256  # Reduced for faster responses
+    temperature: float = 0.5  # Controlled by component via build_model
+    max_tokens: int = 20000  # Reduced for faster responses
     timeout: int = 60  # Allow slower local servers
     _session: Optional[requests.Session] = None
     def _sanitize_final_content(self, content: str) -> str:
@@ -265,6 +265,20 @@ EXAMPLE WORKFLOW:
             for idx, payload in enumerate(payload_variants):
                 # Log outgoing request (without auth header)
                 self._debug("Requesting completion", {"url": self.api_base, "variant": idx, "payload": payload})
+                # Print payload for every API call (mask secrets)
+                try:
+                    safe_headers = dict(headers)
+                    if "Authorization" in safe_headers and isinstance(safe_headers["Authorization"], str):
+                        safe_headers["Authorization"] = "***"
+                    if "x-api-key" in safe_headers and isinstance(safe_headers["x-api-key"], str):
+                        safe_headers["x-api-key"] = "***"
+                    import json as _json
+                    print(
+                        f"[LocalChatModel GPT-OSS] POST {self.api_base} variant={idx} \nheaders={safe_headers} \npayload="
+                        + _json.dumps(payload, ensure_ascii=False)[:4000]
+                    )
+                except Exception:
+                    pass
                 try:
                     response = self._session.post(self.api_base, headers=headers, json=payload, timeout=request_timeout)
                 except requests.exceptions.ReadTimeout:
@@ -933,6 +947,16 @@ class GPTOSSModelComponent(LCModelComponent):
             max_tokens=self.max_tokens,
             timeout=self.timeout,
         )
+        # Log initialization parameters for visibility
+        try:
+            print(
+                f"[GPTOSSModel] Initialized with api_base={getattr(model, 'api_base', '')}, "
+                f"model_name={getattr(model, 'model_name', '')}, "
+                f"temperature={self.temperature}, max_tokens={self.max_tokens}, "
+                f"timeout={self.timeout}, json_mode={self.json_mode}"
+            )
+        except Exception:
+            pass
         
         # Verify tool calling support for debugging
         if hasattr(self, 'verbose') and self.verbose:

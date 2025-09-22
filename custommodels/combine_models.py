@@ -68,9 +68,9 @@ class LocalLanguageModelComponent(LCModelComponent):
         SliderInput(
             name="max_tokens",
             display_name="Max Tokens",
-            value=512,
+            value=20000,
             info="Maximum number of tokens to generate in the response",
-            range_spec=RangeSpec(min=16, max=8192, step=16),
+            range_spec=RangeSpec(min=16, max=20000, step=16),
             advanced=True,
         ),
         SliderInput(

@@ -30,7 +30,7 @@ class LocalChatModel(BaseChatModel):
     model_name: str = MODEL_NAME_HARDCODED
     json_mode: bool = False
     temperature: float = 0.7  
-    max_tokens: int = 512  
+    max_tokens: int = 20000  
     timeout: int = 60
     def _sanitize_final_content(self, content: str) -> str:
         """Remove leaked tool-call JSON and collapse duplicate text, preserving code fences.
@@ -263,6 +263,18 @@ After tools return, provide clean final answer without JSON."""
         }
         
         try:
+            # Print payload for every API call (mask secrets)
+            try:
+                safe_headers = dict(headers)
+                if "Authorization" in safe_headers and isinstance(safe_headers["Authorization"], str):
+                    safe_headers["Authorization"] = "***"
+                import json as _json
+                print(
+                    f"[LocalChatModel Llama] POST {self.api_base} \nheaders={safe_headers} \npayload="
+                    + _json.dumps(payload, ensure_ascii=False)[:4000]
+                )
+            except Exception:
+                pass
             response = requests.post(self.api_base, headers=headers, json=payload, timeout=self.timeout)
             
             # Handle 422 errors specifically
