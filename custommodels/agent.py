@@ -66,19 +66,14 @@ class AgentComponent(ToolCallingAgentComponent):
             advanced=False,
         ),
         IntInput(
-            name="timeout",
-            display_name="Request Timeout (s)",
-            value=60,
-            info="Timeout for API requests in seconds",
+            name="max_tokens",
+            display_name="Max Tokens",
+            value=20000,
+            info="Maximum number of tokens to generate in the response",
             advanced=False,
         ),
-        BoolInput(
-            name="json_mode",
-            display_name="JSON Mode",
-            value=False,
-            info="If True, output JSON format response",
-            advanced=False,
-        ),
+        # Timeout is fixed to 60 seconds in code; no UI control
+        # JSON mode is fixed to False in code; no UI control
         MultilineInput(
             name="system_prompt",
             display_name="Agent Instructions",
@@ -222,14 +217,11 @@ class AgentComponent(ToolCallingAgentComponent):
                 # Minimum sensible floor
                 max_tokens_val = max(16, max_tokens_val)
 
-                raw_timeout = getattr(self, "timeout", 60)
-                try:
-                    timeout_val = int(raw_timeout)
-                except Exception:
-                    timeout_val = 60
-                timeout_val = max(5, timeout_val)
+                # Force timeout to 60 seconds regardless of UI
+                timeout_val = 60
 
-                json_mode_val = bool(getattr(self, "json_mode", False))
+                # Force json_mode to False regardless of UI
+                json_mode_val = False
 
                 crimson_component = CrimsonLocalComponent().set(
                     provider=provider_value,
@@ -249,8 +241,8 @@ class AgentComponent(ToolCallingAgentComponent):
                         f"[SelfHostedAgent] Initializing {self.agent_llm} (provider={provider_value}) "
                         f"with temperature={temperature_val} ({src('temperature')}), "
                         f"max_tokens={max_tokens_val} ({src('max_tokens')}), "
-                        f"timeout={timeout_val} ({src('timeout')}), "
-                        f"json_mode={json_mode_val} ({src('json_mode')})"
+                        f"timeout={timeout_val} (fixed), "
+                        f"json_mode={json_mode_val} (fixed)"
                     )
                 except Exception:
                     pass
