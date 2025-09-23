@@ -2,9 +2,6 @@ from langchain_core.tools import StructuredTool
 
 from langflow.base.agents.agent import LCToolsAgentComponent
 from langflow.base.agents.events import ExceptionWithMessageError
-from langflow.base.models.model_input_constants import (
-    ALL_PROVIDER_FIELDS,
-)
 from langflow.base.models.model_utils import get_model_name
 from langflow.components.helpers.current_date import CurrentDateComponent
 from langflow.components.helpers.memory import MemoryComponent
@@ -37,6 +34,8 @@ class AgentComponent(ToolCallingAgentComponent):
     icon = "bot"
     beta = False
     name = "SelfHostedAgent"
+    # Accept session_id injected by Langflow runtime/build system
+    session_id: str | None = None
 
     memory_inputs = [set_advanced_true(component_input) for component_input in MemoryComponent().inputs]
 
@@ -217,8 +216,8 @@ class AgentComponent(ToolCallingAgentComponent):
                 # Minimum sensible floor
                 max_tokens_val = max(16, max_tokens_val)
 
-                # Force timeout to 60 seconds regardless of UI
-                timeout_val = 60
+                # Force timeout to 180 seconds regardless of UI
+                timeout_val = 180
 
                 # Force json_mode to False regardless of UI
                 json_mode_val = False

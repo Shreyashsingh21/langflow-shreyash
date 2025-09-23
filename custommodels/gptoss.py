@@ -35,7 +35,7 @@ class LocalChatModel(BaseChatModel):
     json_mode: bool = False
     temperature: float = 0.5  # Controlled by component via build_model
     max_tokens: int = 20000  # Reduced for faster responses
-    timeout: int = 60  # Allow slower local servers
+    timeout: int = 180  # Allow slower local servers
     _session: Optional[requests.Session] = None
     def _sanitize_final_content(self, content: str) -> str:
         """Remove leaked tool-call JSON and collapse duplicate consecutive lines, preserving code fences."""
@@ -922,7 +922,7 @@ class GPTOSSModelComponent(LCModelComponent):
             name="timeout",
             display_name="Request Timeout",
             info="Timeout for API requests in seconds. Lower values = faster failures.",
-            value=15,
+            value=180,
             advanced=True,
         ),
         BoolInput(

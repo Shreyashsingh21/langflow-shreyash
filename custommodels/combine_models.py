@@ -76,7 +76,7 @@ class LocalLanguageModelComponent(LCModelComponent):
         SliderInput(
             name="timeout",
             display_name="Request Timeout (s)",
-            value=60,
+            value=180,
             info="Timeout for API requests in seconds",
             range_spec=RangeSpec(min=5, max=300, step=5),
             advanced=True,
