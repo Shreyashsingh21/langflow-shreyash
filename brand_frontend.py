@@ -174,7 +174,8 @@ def apply_branding(index_path: Path, brand: str, title_prefix: str, x_str: str,
           s.style.marginLeft='{margin_left}px';
           s.style.fontFamily='Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
           s.style.fontWeight='700';
-          s.style.color='{color}';
+          // Inherit color from header so it adapts to light/dark themes
+          s.style.color='inherit';
           s.style.fontSize='{font_size}px';
           s.style.display='inline-flex'; s.style.alignItems='center';
           s.style.height='{height}px'; s.style.lineHeight='{height}px'; s.style.verticalAlign='left';
