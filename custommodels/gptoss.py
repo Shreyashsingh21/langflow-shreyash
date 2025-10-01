@@ -259,7 +259,7 @@ EXAMPLE WORKFLOW:
                 self._session.mount("https://", adapter)
             
             # Try each payload variant until one succeeds (non-4xx or specifically not 422)
-            request_timeout = (10, self.timeout)
+            request_timeout = (120, self.timeout)
             last_response = None
             last_error_body: Optional[str] = None
             for idx, payload in enumerate(payload_variants):

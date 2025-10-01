@@ -132,176 +132,156 @@ def revert_backup(file_path: Path) -> bool:
 
 def apply_branding(index_path: Path, brand: str, title_prefix: str, x_str: str,
                    color: str, margin_left: int, top: int, height: int, font_size: int) -> None:
-    # Use the complete branded HTML template from FrontendTrinkaAI/index.html
+    # Update the existing index.html in-place: preserve assets, change title, inject script once
     desired_title = f"{title_prefix} {x_str} {brand}"
     
-    # Complete branded HTML template with ULTRA AGGRESSIVE first-load detection
-    branded_html = f"""<!doctype html>
-<html lang="en">
-  <head>
-    <base href="/" />
-    <meta charset="UTF-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" href="./favicon.ico" />
-    <link rel="manifest" href="./manifest.json" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Chivo:ital,wght@0,100..900;1,100..900&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap"
-      rel="stylesheet"
-    />
-    <title>{desired_title}</title>
-    <script type="module" crossorigin src="./assets/index-B6y615tP.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-CYIVEhXL.css">
-  </head>
-  <body id="body" class="dark" style="width: 100%; height: 100%">
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div style="width: 100vw; height: 100vh" id="root"></div>
-    <script>
-      (function () {{
-        var desiredTitle = '{desired_title}';
-        function setDesiredTitle(){{ if(document.title!==desiredTitle) document.title=desiredTitle; }}
-        setDesiredTitle();
-        new MutationObserver(setDesiredTitle).observe(document.querySelector('title')||document.head,{{subtree:true,childList:true,characterData:true}});
+    html = index_path.read_text(encoding="utf-8")
 
-        function addLabel(){{
-          var left=document.querySelector('[data-testid="header_left_section_wrapper"]');
-          if(!left) return false;
-          if(left.querySelector('#branding-badge')) return true;
-          var s=document.createElement('span');
-          s.id='branding-badge'; s.textContent='{brand}';
-          s.style.marginLeft='{margin_left}px';
-          s.style.fontFamily='Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
-          s.style.fontWeight='700';
-          // Inherit color from header so it adapts to light/dark themes
-          s.style.color='inherit';
-          s.style.fontSize='{font_size}px';
-          s.style.display='inline-flex'; s.style.alignItems='center';
-          s.style.height='{height}px'; s.style.lineHeight='{height}px'; s.style.verticalAlign='left';
-          s.style.position='relative'; s.style.top='{top}px';
-          left.insertBefore(s,left.firstChild && left.firstChild.nextSibling ? left.firstChild.nextSibling : null);
-          return true;
-        }}
-        function ensureLabel(){{ addLabel(); }}
-        
-        // IMMEDIATE execution - try right now
-        ensureLabel();
-        
-        // Multiple immediate attempts with different timings
-        setTimeout(ensureLabel, 0);
-        setTimeout(ensureLabel, 1);
-        setTimeout(ensureLabel, 5);
-        setTimeout(ensureLabel, 10);
-        setTimeout(ensureLabel, 25);
-        setTimeout(ensureLabel, 50);
-        setTimeout(ensureLabel, 100);
-        setTimeout(ensureLabel, 200);
-        setTimeout(ensureLabel, 500);
-        setTimeout(ensureLabel, 1000);
-        setTimeout(ensureLabel, 2000);
-        setTimeout(ensureLabel, 3000);
-        setTimeout(ensureLabel, 5000);
-        
-        // Event listeners for all possible scenarios
-        if(document.readyState==='complete' || document.readyState==='interactive'){{ 
-          ensureLabel(); 
-        }} else {{ 
-          window.addEventListener('DOMContentLoaded', ensureLabel); 
-        }}
-        window.addEventListener('load', ensureLabel);
-        document.addEventListener('DOMContentLoaded', ensureLabel);
-        document.addEventListener('readystatechange', function(){{
-          if(document.readyState==='complete' || document.readyState==='interactive'){{
-            ensureLabel();
-          }}
-        }});
-        
-        // Ultra aggressive retry mechanism
-        var retryCount = 0;
-        var maxRetries = 200;
-        var retryInterval = setInterval(function(){{
-          if(ensureLabel() || retryCount >= maxRetries){{
-            clearInterval(retryInterval);
-          }}
-          retryCount++;
-        }}, 10);
-        
-        // Multiple observers for different scenarios
-        new MutationObserver(function(){{ ensureLabel(); }}).observe(document.documentElement,{{childList:true,subtree:true}});
-        new MutationObserver(function(){{ ensureLabel(); }}).observe(document.body,{{childList:true,subtree:true}});
-        new MutationObserver(function(){{ ensureLabel(); }}).observe(document.head,{{childList:true,subtree:true}});
-        
-        // Additional observers for specific elements
-        var rootObserver = new MutationObserver(function(){{ ensureLabel(); }});
-        rootObserver.observe(document.getElementById('root'), {{childList:true,subtree:true}});
-        
-        // Handle SPA navigation
-        var originalPushState = history.pushState;
-        var originalReplaceState = history.replaceState;
-        history.pushState = function(){{ originalPushState.apply(history, arguments); setTimeout(ensureLabel, 1); }};
-        history.replaceState = function(){{ originalReplaceState.apply(history, arguments); setTimeout(ensureLabel, 1); }};
-        window.addEventListener('popstate', function(){{ setTimeout(ensureLabel, 1); }});
-        window.addEventListener('hashchange', function(){{ setTimeout(ensureLabel, 1); }});
-        
-        // Additional SPA detection
-        window.addEventListener('beforeunload', function(){{ ensureLabel(); }});
-        window.addEventListener('pageshow', function(){{ ensureLabel(); }});
-        window.addEventListener('pagehide', function(){{ ensureLabel(); }});
-        
-        // React/Vue specific detection
-        if(window.React){{
-          var originalReactCreateElement = window.React.createElement;
-          window.React.createElement = function(){{
-            var result = originalReactCreateElement.apply(this, arguments);
-            setTimeout(ensureLabel, 1);
-            return result;
-          }};
-        }}
-        
-        // Additional framework detection
-        if(window.Vue){{
-          var originalVueCreateElement = window.Vue.createElement;
-          window.Vue.createElement = function(){{
-            var result = originalVueCreateElement.apply(this, arguments);
-            setTimeout(ensureLabel, 1);
-            return result;
-          }};
-        }}
-        
-        // Force execution on any DOM change
-        var forceObserver = new MutationObserver(function(){{
-          setTimeout(ensureLabel, 1);
-        }});
-        forceObserver.observe(document, {{childList:true,subtree:true,attributes:true,characterData:true}});
-        
-        // Additional immediate execution strategies
-        requestAnimationFrame(ensureLabel);
-        requestAnimationFrame(function(){{ requestAnimationFrame(ensureLabel); }});
-        
-        // Webpack/Module loading detection
-        if(window.webpackChunkName){{
-          setTimeout(ensureLabel, 100);
-        }}
-        
-        // Service Worker detection
-        if('serviceWorker' in navigator){{
-          navigator.serviceWorker.addEventListener('message', function(){{ ensureLabel(); }});
-        }}
-        
-        // Additional immediate execution
-        if(window.requestIdleCallback){{
-          requestIdleCallback(ensureLabel);
-        }} else {{
-          setTimeout(ensureLabel, 1);
-        }}
-      }})();
-    </script>
-  </body>
-</html>"""
-    
-    # Replace the entire file with the branded version
-    index_path.write_text(branded_html, encoding="utf-8")
+    # Cleanup from any previous bad regex replacement that left literal \1 ... \3 text in the HTML
+    # Remove occurrences like: \1...\3 (non-greedy)
+    html = re.sub(r"\\1.*?\\3", "", html, flags=re.DOTALL)
+
+    # 1) Update <title> while preserving the rest
+    title_re = re.compile(r"(<title>)(.*?)(</title>)", re.IGNORECASE | re.DOTALL)
+    if title_re.search(html):
+        html = title_re.sub(rf"\\1{re.escape(desired_title)}\\3", html)
+    else:
+        head_close_re = re.compile(r"</head>", re.IGNORECASE)
+        if head_close_re.search(html):
+            html = head_close_re.sub(f"  <title>{desired_title}</title>\n  </head>", html)
+        else:
+            html = f"<head>\n  <title>{desired_title}</title>\n</head>\n" + html
+
+    # 1.1) Inject CSS-based fallback label via ::after on header container
+    style_marker = "BRANDING_STYLE_INJECTED"
+    if style_marker not in html:
+        css = (
+            "<style id=\"branding-style\">/* "+style_marker+" */\n"
+            ":root { --branding-margin-left: "+str(margin_left)+"px; }\n"
+            "header [data-testid=\"header_left_section_wrapper\"], [data-testid=\"header_left_section_wrapper\"] { position: relative; }\n"
+            "header [data-testid=\"header_left_section_wrapper\"]::after, [data-testid=\"header_left_section_wrapper\"]::after {\n"
+            "  content: '"+brand+"';\n"
+            "  display: inline-flex; align-items: center; font-weight: 700; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n"
+            "  color: inherit; margin-left: var(--branding-margin-left); font-size: "+str(font_size)+"px;\n"
+            "}\n"
+            "</style>"
+        )
+        head_close_re2 = re.compile(r"</head>", re.IGNORECASE)
+        if head_close_re2.search(html):
+            html = head_close_re2.sub(css + "\n</head>", html)
+        else:
+            html = css + "\n" + html
+
+    # 2) Inject branding script idempotently before </body>
+    marker_comment = "BRANDING_INJECTED"
+    branding_marker_id = "branding-badge"
+    if marker_comment not in html and branding_marker_id not in html:
+        script_template = """<script>/* BRANDING_INJECTED */(function(){
+  var desiredTitle='__TITLE__'.trim();
+  function setDesiredTitle(){ if(document.title!==desiredTitle) document.title=desiredTitle; }
+  function qs(sel){ try{ return document.querySelector(sel); }catch(e){ return null; } }
+  function findHeaderHost(){
+    var selectors = [
+      '[data-testid="header_left_section_wrapper"]',
+      '[data-testid="header_left_section"]',
+      '[data-testid="header"]',
+      '[data-testid^="header_"]',
+      'header [data-testid="header_left_section_wrapper"]',
+      'header [data-testid="header_left_section"]',
+      'header [data-testid]',
+      'header .mantine-Group-root',
+      'header .mantine-Group-inner',
+      'header [class*="Group-root"]',
+      'header [class*="Group-inner"]',
+      'header [class*="Flex-root"]',
+      'header [class*="Stack-root"]',
+      'header',
+      '[role="banner"]'
+    ];
+    for(var i=0;i<selectors.length;i++){
+      var el=qs(selectors[i]);
+      if(el) return el;
+    }
+    return null;
+  }
+  function getLogo(host){ return (host && (host.querySelector('svg, img') || host.firstElementChild)) || null; }
+  function ensureHostPositioning(host){
+    try{
+      var cs = window.getComputedStyle(host);
+      if(cs && cs.position === 'static'){ host.style.position='relative'; }
+    }catch(e){}
+  }
+  function makeSpan(){
+    var s=document.createElement('span');
+    s.id='branding-badge'; s.textContent='__BRAND__'; s.setAttribute('aria-label','__BRAND__');
+    s.style.fontFamily='Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+    s.style.fontWeight='700'; s.style.color='inherit'; s.style.fontSize='__FONTSIZE__px'; s.style.whiteSpace='nowrap';
+    return s;
+  }
+  function addLabelInHost(){
+    var host=findHeaderHost();
+    if(!host) return false;
+    ensureHostPositioning(host);
+    var old=document.getElementById('branding-badge'); if(old&&old.parentNode) old.parentNode.removeChild(old);
+    var s=makeSpan();
+    // Inline element placed right after the logo – avoids layout shifts
+    s.style.position='static'; s.style.display='inline-flex'; s.style.alignItems='center'; s.style.verticalAlign='middle'; s.style.marginLeft='__MARGIN__px';
+    function sync(){
+      try{
+        var hostRect=host.getBoundingClientRect(); var h=Math.max(24, Math.round(hostRect.height));
+        s.style.height=h+'px'; s.style.lineHeight=h+'px';
+      }catch(e){}
+    }
+    var logo=getLogo(host);
+    if(logo && logo.parentNode){ logo.parentNode.insertBefore(s, logo.nextSibling); } else { host.appendChild(s); }
+    sync();
+    window.addEventListener('resize', sync, {passive:true});
+    try{ new ResizeObserver(sync).observe(host); }catch(e){}
+    return true;
+  }
+  function addLabelFixed(){
+    var header = qs('header') || qs('[role="banner"]') || document.body;
+    var old=document.getElementById('branding-badge'); if(old&&old.parentNode) old.parentNode.removeChild(old);
+    var s=makeSpan();
+    s.style.position='fixed'; s.style.pointerEvents='none'; s.style.zIndex='9999';
+    s.style.color='#ffffff'; s.style.background='rgba(0,0,0,0.35)'; s.style.backdropFilter='blur(2px)';
+    s.style.borderRadius='6px'; s.style.padding='2px 6px';
+    function sync(){
+      try{
+        var r = header.getBoundingClientRect();
+        var top = r.top + r.height/2; var left = r.left + 56 + __MARGIN__;
+        s.style.left=left+'px'; s.style.top=top+'px'; s.style.transform='translateY(-50%)';
+      }catch(e){}
+    }
+    document.body.appendChild(s); sync(); window.addEventListener('resize', sync, {passive:true});
+    return true;
+  }
+  function addLabel(){ return addLabelInHost() || addLabelFixed(); }
+  function ensure(){ setDesiredTitle(); addLabel(); }
+  ensure(); setTimeout(ensure,1); setTimeout(ensure,50); setTimeout(ensure,200); setTimeout(ensure,500);
+  var tries=0; var maxTries=300; var timer=setInterval(function(){ if(addLabel()||tries++>=maxTries){ clearInterval(timer);} },50);
+  try{ new MutationObserver(function(){ addLabel(); }).observe(document.body,{childList:true,subtree:true}); }catch(e){}
+  window.addEventListener('load',ensure); document.addEventListener('DOMContentLoaded',ensure);
+})();</script>"""
+        script = (script_template
+                  .replace('__TITLE__', desired_title)
+                  .replace('__BRAND__', brand)
+                  .replace('__MARGIN__', str(margin_left))
+                  .replace('__FONTSIZE__', str(font_size))
+                  .replace('__HEIGHT__', str(height))
+                  )
+
+        body_html_close_re = re.compile(r"</body>\s*</html>\s*$", re.IGNORECASE)
+        if body_html_close_re.search(html):
+            html = body_html_close_re.sub(script + "\n</body>\n</html>", html)
+        else:
+            body_close_re = re.compile(r"</body>", re.IGNORECASE)
+            if body_close_re.search(html):
+                html = body_close_re.sub(script + "\n</body>", html)
+            else:
+                html = html + "\n" + script
+
+    index_path.write_text(html, encoding="utf-8")
 
 
 def create_backup(frontend_dir: Path) -> bool:

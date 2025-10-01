@@ -17,6 +17,8 @@ import sys
 import sysconfig
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from tqdm import tqdm
+import time
 
 
 class ComponentValidator:
@@ -198,32 +200,62 @@ class CustomflowsAutomation:
         
         return all_files
     
-    def validate_components(self, python_files: List[Path]) -> List[Dict[str, Any]]:
-        """Validate that Python files are proper Langflow components."""
+    def validate_components(self, python_files: List[Path], progress_desc: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Validate that Python files are proper Langflow components.
+
+        When progress_desc is provided, shows a tqdm progress bar with that description.
+        """
         valid_components = []
-        
-        for file_path in python_files:
-            print(f"Validating: {file_path.name}")
-            validation_result = self.validator.is_langflow_component(file_path)
-            
-            if validation_result['is_valid']:
-                component_info = {
-                    'file_path': file_path,
-                    'file_name': file_path.name,
-                    'component_classes': validation_result['component_classes']
-                }
-                valid_components.append(component_info)
-                print(f"  Valid component with classes: {[c['name'] for c in validation_result['component_classes']]}")
-            else:
-                if validation_result['error']:
-                    print(f"  Error parsing {file_path.name}: {validation_result['error']}")
-                elif not validation_result['imports_langflow']:
-                    print(f"  {file_path.name} doesn't import langflow - skipping")
-                elif not validation_result['component_classes']:
-                    print(f"  {file_path.name} doesn't contain component classes - skipping")
+
+        iterable = python_files
+        progress = None
+        if progress_desc is not None:
+            progress = tqdm(
+                total=len(python_files),
+                desc=progress_desc,
+                unit="file",
+                position=1,
+                leave=False,
+                dynamic_ncols=True,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+            )
+
+        try:
+            for file_path in iterable:
+                msg_prefix = f"Validating: {file_path.name}"
+                if progress is None:
+                    print(msg_prefix)
+
+                validation_result = self.validator.is_langflow_component(file_path)
+
+                if validation_result['is_valid']:
+                    component_info = {
+                        'file_path': file_path,
+                        'file_name': file_path.name,
+                        'component_classes': validation_result['component_classes']
+                    }
+                    valid_components.append(component_info)
+                    valid_msg = f"  Valid component with classes: {[c['name'] for c in validation_result['component_classes']]}"
+                    if progress is None:
+                        print(valid_msg)
                 else:
-                    print(f"  {file_path.name} is not a valid Langflow component")
-        
+                    if validation_result['error']:
+                        err_msg = f"  Error parsing {file_path.name}: {validation_result['error']}"
+                    elif not validation_result['imports_langflow']:
+                        err_msg = f"  {file_path.name} doesn't import langflow - skipping"
+                    elif not validation_result['component_classes']:
+                        err_msg = f"  {file_path.name} doesn't contain component classes - skipping"
+                    else:
+                        err_msg = f"  {file_path.name} is not a valid Langflow component"
+                    if progress is None:
+                        print(err_msg)
+
+                if progress is not None:
+                    progress.update(1)
+        finally:
+            if progress is not None:
+                progress.close()
+
         return valid_components
     
     def create_category_directory(self, category_name: str, description: str) -> Path:
@@ -242,27 +274,55 @@ class CustomflowsAutomation:
         
         return category_dir
     
-    def copy_components_to_langflow(self, valid_components: List[Dict[str, Any]], target_dir: Path) -> List[str]:
-        """Copy valid components to the Langflow components directory."""
+    def copy_components_to_langflow(self, valid_components: List[Dict[str, Any]], target_dir: Path, progress_desc: Optional[str] = None) -> List[str]:
+        """Copy valid components to the Langflow components directory.
+
+        When progress_desc is provided, shows a tqdm progress bar with that description.
+        """
         copied_files = []
-        
-        for component_info in valid_components:
-            source_file = component_info['file_path']
-            target_file = target_dir / component_info['file_name']
-            
-            try:
-                # Copy the component file
-                shutil.copy2(source_file, target_file)
-                copied_files.append(component_info['file_name'])
-                print(f"Copied: {component_info['file_name']}")
-                
-                # Log component classes found
-                for cls_info in component_info['component_classes']:
-                    print(f"  Component: {cls_info['name']} (extends {cls_info['base_class']})")
-                    
-            except Exception as e:
-                print(f"Failed to copy {source_file.name}: {str(e)}")
-        
+
+        progress = None
+        if progress_desc is not None:
+            progress = tqdm(
+                total=len(valid_components),
+                desc=progress_desc,
+                unit="file",
+                position=1,
+                leave=False,
+                dynamic_ncols=True,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+            )
+
+        try:
+            for component_info in valid_components:
+                source_file = component_info['file_path']
+                target_file = target_dir / component_info['file_name']
+
+                try:
+                    # Copy the component file
+                    shutil.copy2(source_file, target_file)
+                    copied_files.append(component_info['file_name'])
+                    msg = f"Copied: {component_info['file_name']}"
+                    if progress is None:
+                        print(msg)
+
+                    # Log component classes found
+                    for cls_info in component_info['component_classes']:
+                        cls_msg = f"  Component: {cls_info['name']} (extends {cls_info['base_class']})"
+                        if progress is None:
+                            print(cls_msg)
+
+                except Exception as e:
+                    err = f"Failed to copy {source_file.name}: {str(e)}"
+                    if progress is None:
+                        print(err)
+
+                if progress is not None:
+                    progress.update(1)
+        finally:
+            if progress is not None:
+                progress.close()
+
         return copied_files
     
     def update_category_init_file(self, target_dir: Path, copied_files: List[str], category_name: str):
@@ -349,6 +409,7 @@ class CustomflowsAutomation:
         
         # Create backup if requested
         if create_backup:
+            print("Creating backup...")
             self.create_backup()
         
         # Step 1: Scan for Python files in both directories
@@ -368,7 +429,8 @@ class CustomflowsAutomation:
             print(f"\n--- Processing {directory_type.upper()} ---")
             
             # Step 2: Validate components
-            valid_components = self.validate_components(python_files)
+            valid_progress_desc = f"Validating {directory_type}"
+            valid_components = self.validate_components(python_files, progress_desc=valid_progress_desc)
             if not valid_components:
                 print(f"No valid Langflow components found in {directory_type}")
                 continue
@@ -387,7 +449,8 @@ class CustomflowsAutomation:
             created_categories.append(category_name)
             
             # Step 4: Copy components
-            copied_files = self.copy_components_to_langflow(valid_components, target_dir)
+            copy_progress_desc = f"Copying {directory_type}"
+            copied_files = self.copy_components_to_langflow(valid_components, target_dir, progress_desc=copy_progress_desc)
             
             if copied_files:
                 # Step 5: Update category __init__.py file
